@@ -4,6 +4,25 @@ A Windows desktop wealth-management dashboard, converted from the original web
 mockup to a native Visual Studio project. All monetary values now display in
 **Kenyan Shillings (KSh / KES)** instead of US dollars.
 
+## Download & install (end users)
+
+No build tools needed:
+
+1. Download the latest installer from
+   **[Releases](https://github.com/aypwwan/MaridewFinance/releases/latest)** —
+   `MaridewFinanceSetup-<version>.exe`.
+2. Run it. It installs into Program Files, creates a Start-menu shortcut, and
+   bootstraps the .NET 8 / WebView2 runtimes if they are missing.
+3. That's it. The app **updates itself**: it checks the release feed, verifies
+   the installer's SHA-256, installs silently after a UAC prompt, and
+   relaunches. You can also check manually in *Settings → Software Updates*.
+
+> **SmartScreen note:** the installer is signed with Maridew's own certificate
+> authority, so machines that have not trusted that CA yet may show an
+> "unknown publisher" warning. To trust it, run
+> `installer\signing\trust-ca.ps1` from an elevated prompt, or click
+> *More info → Run anyway*.
+
 ## What this is
 
 - A **WPF (.NET 8) desktop application** that opens directly in Visual Studio.
