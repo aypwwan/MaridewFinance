@@ -391,8 +391,7 @@ namespace MaridewFinance.App
                 : "'No update feed is configured for this install.'";
             return "$ErrorActionPreference = 'Stop'\r\n"
                 + "try {\r\n"
-                + "    $r = Invoke-WebRequest -Uri '" + FeedUrl() + "' -UseBasicParsing -TimeoutSec 20 -MaximumRedirection 5\r\n"
-                + "    [System.IO.File]::WriteAllText('" + feedFile + "', $r.Content)\r\n"
+                + "    Invoke-WebRequest -Uri '" + FeedUrl() + "' -UseBasicParsing -TimeoutSec 20 -MaximumRedirection 5 -OutFile '" + feedFile + "'\r\n"
                 + "} catch {\r\n"
                 + "    $msg = " + failBody + " -replace '\"', \"'\"\r\n"
                 + "    [System.IO.File]::WriteAllText('" + feedFile + "', ('{\"error\": \"' + $msg + '\"}'))\r\n"
