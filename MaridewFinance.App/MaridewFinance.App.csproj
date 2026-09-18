@@ -11,7 +11,7 @@
     <AssemblyTitle>Maridew Finance</AssemblyTitle>
     <Product>Maridew Finance</Product>
     <Company>Maridew</Company>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
