@@ -17,6 +17,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 1.0.1). Must match the csproj and UpdateService.CurrentVersion.'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -33,10 +39,14 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Derive version from tag
+      - name: Derive version from tag (or dispatch input)
         id: ver
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $tag = 'v' + '${{ inputs.version }}'
+          } else {
+            $tag = $env:GITHUB_REF_NAME
+          }
           if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
             Write-Error "Tag '$tag' must look like v1.2.3 (semantic version with a leading v)."
             exit 1

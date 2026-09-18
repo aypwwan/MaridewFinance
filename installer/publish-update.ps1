@@ -96,8 +96,15 @@ try {
 }
 
 # --- 4. Upload assets (delete + re-upload for idempotency) ------------------
+# Uploads go through curl.exe, not Invoke-RestMethod: GitHub's upload endpoint
+# rejects PowerShell's raw-body request style with "Multipart form data
+# required", and curl with --data-binary (a real Content-Length) is what the
+# endpoint accepts. curl.exe is preinstalled on Windows 10/11 and CI runners;
+# spell it with .exe - bare `curl` in PowerShell aliases Invoke-WebRequest.
 $assets = @(@{ Path = $SetupExe; Name = (Split-Path -Leaf $SetupExe) },
             @{ Path = $null;    Name = "latest.json"; Content = $json })
+
+$uploadBase = ($release.upload_url -split '\{')[0]   # strip the {?name,label} URI template
 
 foreach ($a in $assets) {
     # Remove an existing asset with the same name.
@@ -107,15 +114,30 @@ foreach ($a in $assets) {
             Write-Host "Replaced existing asset: $($a.Name)"
         }
     }
+
+    $tmpBody = $null
     if ($null -ne $a.Content) {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($a.Content)
+        $tmpBody = Join-Path ([IO.Path]::GetTempPath()) ("asset-" + [guid]::NewGuid().ToString('N') + ".json")
+        [IO.File]::WriteAllBytes($tmpBody, [System.Text.Encoding]::UTF8.GetBytes($a.Content))
+        $bodyPath = $tmpBody
     } else {
-        $bytes = [System.IO.File]::ReadAllBytes($a.Path)
+        $bodyPath = $a.Path
     }
-    $upload = Invoke-RestMethod -Method Post `
-        -Uri "$($release.upload_url.ToString().Split('?')[0])?name=$($a.Name)" `
-        -Headers $headers -Body $bytes -ContentType "application/octet-stream"
-    Write-Host ("Uploaded   : {0}  ({1} bytes)" -f $upload.name, $upload.size)
+
+    $name = [uri]::EscapeDataString($a.Name)
+    $tmpOut = Join-Path ([IO.Path]::GetTempPath()) ("asset-resp-" + [guid]::NewGuid().ToString('N') + ".json")
+    & curl.exe -sS --fail-with-body `
+        -H "Authorization: Bearer $Token" -H "User-Agent: maridew-finance-release" `
+        -H "Content-Type: application/octet-stream" `
+        --data-binary "@$bodyPath" -o "$tmpOut" `
+        "$uploadBase`?name=$name"
+    if ($tmpBody) { Remove-Item $tmpBody -Force -ErrorAction SilentlyContinue }
+    if ($LASTEXITCODE -ne 0) { throw "curl upload failed for $($a.Name) (exit $LASTEXITCODE)" }
+
+    $uploaded = Get-Content $tmpOut -Raw | ConvertFrom-Json
+    Remove-Item $tmpOut -Force -ErrorAction SilentlyContinue
+    if ($uploaded.state -ne "uploaded") { throw "upload of $($a.Name) did not complete: $($uploaded | ConvertTo-Json -Compress)" }
+    Write-Host ("Uploaded   : {0}  ({1} bytes)" -f $uploaded.name, $uploaded.size)
 }
 
 Write-Host ""
