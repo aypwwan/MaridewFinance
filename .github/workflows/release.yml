@@ -1,0 +1,132 @@
+# Release pipeline: builds the installer and publishes it to GitHub Releases.
+#
+# Triggered by pushing a version tag (git push origin v1.0.1). The workflow
+# refuses to run unless the tag matches BOTH <Version> in MaridewFinance.App.csproj
+# and UpdateService.CurrentVersion - so the published feed always agrees with
+# what installed copies of the app report about themselves.
+#
+# Optional code signing: add repo secrets MARIDEW_SIGN_PFX_B64 (base64 of a
+# .pfx) and MARIDEW_SIGN_PASSWORD. Without them the installer is built unsigned
+# (same as a local build without a certificate).
+#
+# See installer/AUTO-UPDATE.md for the full release process.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: ver
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            Write-Error "Tag '$tag' must look like v1.2.3 (semantic version with a leading v)."
+            exit 1
+          }
+          $version = $tag.Substring(1)
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Releasing version $version"
+
+      - name: Verify source versions match the tag
+        run: |
+          $version = '${{ steps.ver.outputs.version }}'
+
+          $csproj = Get-Content 'MaridewFinance.App/MaridewFinance.App.csproj' -Raw
+          if ($csproj -notmatch [regex]::Escape("<Version>$version</Version>")) {
+            Write-Error "MaridewFinance.App.csproj <Version> does not match $version. Bump <Version> first."
+            exit 1
+          }
+
+          $updateSvc = Get-Content 'MaridewFinance.App/UpdateService.cs' -Raw
+          if ($updateSvc -notmatch [regex]::Escape("CurrentVersion = ""$version"";")) {
+            Write-Error "UpdateService.CurrentVersion does not match $version. Bump CurrentVersion first."
+            exit 1
+          }
+
+          Write-Host "Version $version verified in csproj and UpdateService."
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Ensure Inno Setup 6
+        run: |
+          $iscc = @(
+            Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+            Join-Path $env:ProgramFiles       'Inno Setup 6\ISCC.exe'
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($iscc) {
+            Write-Host "Inno Setup present: $iscc"
+          } else {
+            Write-Host 'Inno Setup not found - installing via Chocolatey...'
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Import signing certificate (optional)
+        env:
+          MARIDEW_SIGN_PFX_B64: ${{ secrets.MARIDEW_SIGN_PFX_B64 }}
+          MARIDEW_SIGN_PASSWORD: ${{ secrets.MARIDEW_SIGN_PASSWORD }}
+        run: |
+          if (-not $env:MARIDEW_SIGN_PFX_B64) {
+            Write-Host 'No MARIDEW_SIGN_PFX_B64 secret set - the installer will be unsigned.'
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'maridew-finance.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:MARIDEW_SIGN_PFX_B64))
+          "MARIDEW_SIGN_PFX=$pfx" >> $env:GITHUB_ENV
+          "MARIDEW_SIGN_PASSWORD=$env:MARIDEW_SIGN_PASSWORD" >> $env:GITHUB_ENV
+          Write-Host 'Signing certificate imported from secrets.'
+
+      - name: Build installer
+        run: |
+          $version = '${{ steps.ver.outputs.version }}'
+          $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
+          powershell -NoProfile -ExecutionPolicy Bypass -File 'installer/build.ps1' -Version $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload build artifact (for inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: |
+            installer/dist/MaridewFinanceSetup-*.exe
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = '${{ steps.ver.outputs.version }}'
+          powershell -NoProfile -ExecutionPolicy Bypass -File 'installer/publish-update.ps1' `
+            -Repo '${{ github.repository }}' -Version $version -Notes "Release $version."
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Summary
+        run: |
+          $version = '${{ steps.ver.outputs.version }}'
+          $repo = '${{ github.repository }}'
+          "### Released Maridew Finance $version"            >> $env:GITHUB_STEP_SUMMARY
+          ""                                                  >> $env:GITHUB_STEP_SUMMARY
+          "Feed: https://github.com/$repo/releases/latest/download/latest.json" >> $env:GITHUB_STEP_SUMMARY
+          "Installer: https://github.com/$repo/releases/download/v$version/MaridewFinanceSetup-$version.exe" >> $env:GITHUB_STEP_SUMMARY
+          "Installed copies see the update on their next check." >> $env:GITHUB_STEP_SUMMARY
