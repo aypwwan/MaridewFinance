@@ -1,0 +1,71 @@
+<Window x:Class="MaridewFinance.App.LockWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Maridew Finance - Locked"
+        Height="420" Width="420"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        WindowStyle="SingleBorderWindow"
+        Background="#090D16">
+
+    <Grid Margin="28">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Branding -->
+        <StackPanel Grid.Row="0" HorizontalAlignment="Center" Margin="0,4,0,18">
+            <Border Width="56" Height="56" CornerRadius="14">
+                <Border.Background>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                        <GradientStop Color="#4F46E5" Offset="0"/>
+                        <GradientStop Color="#34D399" Offset="1"/>
+                    </LinearGradientBrush>
+                </Border.Background>
+                <TextBlock Text="M" FontSize="26" FontWeight="Bold" Foreground="White"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <TextBlock Text="Maridew Finance" FontSize="18" FontWeight="Bold"
+                       Foreground="White" HorizontalAlignment="Center" Margin="0,10,0,2"/>
+            <TextBlock Text="Session locked for your privacy."
+                       FontSize="11" Foreground="#94A3B8" HorizontalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Identity + password -->
+        <StackPanel Grid.Row="1" VerticalAlignment="Top">
+            <TextBlock x:Name="LockedUserText" Text="" FontSize="13" FontWeight="SemiBold"
+                       Foreground="#E2E8F0" HorizontalAlignment="Center" Margin="0,0,0,12"/>
+
+            <TextBlock Text="Password" Foreground="#CBD5E1" FontSize="12" Margin="0,0,0,4"/>
+            <PasswordBox x:Name="PasswordBox" Height="32" Padding="6,4"/>
+
+            <TextBlock x:Name="ErrorText" Foreground="#FB7185" FontSize="12"
+                       TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" VerticalAlignment="Bottom" Margin="0,0,0,12">
+            <TextBlock Text="Unlocking keeps you signed in — your data is untouched."
+                       FontSize="11" Foreground="#64748B" TextWrapping="Wrap"
+                       HorizontalAlignment="Center" TextAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Actions -->
+        <Grid Grid.Row="3">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Button x:Name="UnlockButton" Content="Unlock" Click="OnUnlock"
+                    Height="38" FontSize="14" FontWeight="SemiBold" IsDefault="True"
+                    Background="#4F46E5" Foreground="White" BorderThickness="0"
+                    Cursor="Hand"/>
+            <Button x:Name="SignOutButton" Grid.Column="1" Content="Sign Out" Click="OnSignOut"
+                    Height="38" FontSize="13" Margin="8,0,0,0" Padding="14,0"
+                    Background="#1E293B" Foreground="#CBD5E1" BorderThickness="0"
+                    Cursor="Hand"/>
+        </Grid>
+    </Grid>
+</Window>

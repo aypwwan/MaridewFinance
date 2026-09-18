@@ -1,0 +1,13 @@
+# Installer build outputs (regenerate with installer\build.ps1)
+publish-installer/
+installer/dist/
+
+# Signing keys and certificates — sensitive, never commit
+installer/signing/private/
+
+# .NET build outputs and tooling cache
+bin/
+obj/
+publish/
+.vs/
+*.user
