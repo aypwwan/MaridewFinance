@@ -251,7 +251,7 @@
         var go = busyBtn('Sign In');
         card.appendChild(go);
         card.appendChild(el('div', 'text-[11px] text-slate-500 mt-4 leading-relaxed',
-            'Accounts and data live in this browser (IndexedDB). Use Settings > Export to back up or move your data.'));
+            'Accounts live in this browser only (IndexedDB) - the same username on another device is a separate account. Use Settings > Export to move data.'));
 
         var mode = 'in';
         function setMode(m) {
@@ -326,7 +326,7 @@
 
     function signIn(username, pass) {
         return findUserByName(username).then(function (u) {
-            if (!u) return { ok: false, error: 'No account with that username.' };
+            if (!u) return { ok: false, error: 'No account named "' + username + '" in THIS browser. Accounts live per-browser: new here? Tap "Create Account" to register, or use Settings > Export in the browser where your data lives.' };
             return hashPassword(pass, u.salt).then(function (hash) {
                 if (hash !== u.hash) return { ok: false, error: 'Incorrect password.' };
                 return { ok: true, userId: u.id };
