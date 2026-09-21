@@ -7,10 +7,9 @@ mockup to a native Visual Studio project. All monetary values now display in
 ## Use it in your browser (no install)
 
 **[Launch the web edition](https://aypwwan.github.io/MaridewFinance/)** — the exact same dashboard,
-running entirely client-side. Create an account and your data is stored in your own browser
-(IndexedDB); nothing is ever sent to a server. Use **Settings → Export** to back up or move
-your data. For full features (real database backups, auto-update, desktop integration) use
-the Windows installer below.
+running entirely client-side. Create an account and it works from any device: data is encrypted
+in your browser (AES-GCM, PBKDF2-derived key) before it's synced, so the server stores only
+ciphertext it cannot read. Use **Settings → Export** for a portable JSON backup.
 
 ## Download & install (end users)
 
