@@ -72,6 +72,7 @@ namespace MaridewFinance.App
             public string LastPullAt { get; set; } = "";
             public string LastError { get; set; } = "";
             public string LastPushFingerprint { get; set; } = "";   // sha256 of last uploaded payload
+            public bool PendingReload { get; set; }                  // pull merged new data; page should reload
         }
 
         public CloudSyncService()
@@ -120,7 +121,8 @@ namespace MaridewFinance.App
                     lastPush = _state.LastPushAt,
                     lastPull = _state.LastPullAt,
                     lastError = _state.LastError,
-                    busy = _busy
+                    busy = _busy,
+                    pendingReload = _state.PendingReload
                 });
             }
         }
@@ -304,7 +306,11 @@ namespace MaridewFinance.App
                     if (cloudChanged)
                     {
                         MergeCloudIntoDesktop(payload, cloudNewer: true);
-                        lock (_gate) { _state.LastPullAt = Now(); }
+                        lock (_gate)
+                        {
+                            _state.LastPullAt = Now();
+                            _state.PendingReload = true;   // dashboard should re-read the DB
+                        }
                     }
                     lock (_gate)
                     {
@@ -334,6 +340,22 @@ namespace MaridewFinance.App
             {
                 _busy = false;
                 _syncInProgress = false;
+            }
+        }
+
+        /// <summary>
+        /// Called by the dashboard after it reloaded in response to PendingReload,
+        /// so the flag does not trigger another reload.
+        /// </summary>
+        public void AcknowledgeReload()
+        {
+            lock (_gate)
+            {
+                if (_state.PendingReload)
+                {
+                    _state.PendingReload = false;
+                    SaveStateLocked();
+                }
             }
         }
 

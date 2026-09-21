@@ -4145,6 +4145,13 @@ closeModal('categoryModal');
             if (!cloud) { card.classList.add('hidden'); return; }   // browser edition: syncs by itself
             let st = {};
             try { st = JSON.parse(await cloud.GetStatus()) || {}; } catch (e) { return; }
+            if (st.pendingReload) {
+                // A background pull merged new data into the database — reload
+                // once so every tab reflects it (flag cleared first).
+                try { cloud.AcknowledgeReload(); } catch (e) {}
+                window.location.reload();
+                return;
+            }
             const status = document.getElementById('cloudsync-status');
             const toggle = document.getElementById('cloudsync-toggle-btn');
             const nowBtn = document.getElementById('cloudsync-now-btn');
@@ -4213,7 +4220,8 @@ closeModal('categoryModal');
                     return;
                 }
                 cloudSyncCancel();
-                refreshCloudSyncUI();
+                // Enable merged/pushed data — reload so all tabs reflect it.
+                window.location.reload();
             } catch (e) {
                 if (err) { err.innerText = 'Could not enable cloud sync: ' + e.message; err.classList.remove('hidden'); }
             }
