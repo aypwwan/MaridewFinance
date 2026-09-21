@@ -4,6 +4,14 @@ A Windows desktop wealth-management dashboard, converted from the original web
 mockup to a native Visual Studio project. All monetary values now display in
 **Kenyan Shillings (KSh / KES)** instead of US dollars.
 
+## Use it in your browser (no install)
+
+**[Launch the web edition](https://aypwwan.github.io/MaridewFinance/)** — the exact same dashboard,
+running entirely client-side. Create an account and your data is stored in your own browser
+(IndexedDB); nothing is ever sent to a server. Use **Settings → Export** to back up or move
+your data. For full features (real database backups, auto-update, desktop integration) use
+the Windows installer below.
+
 ## Download & install (end users)
 
 No build tools needed:
