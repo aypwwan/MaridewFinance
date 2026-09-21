@@ -26,6 +26,12 @@
     // Keep in sync with UpdateService.CurrentVersion (v-bump: release day).
     var WEB_VERSION = '1.0.3';
 
+    // ---- Cloud sync (zero-knowledge). Empty = local-only accounts. ----
+    // When set, accounts live on the sync Worker and data is AES-GCM
+    // encrypted in THIS browser (PBKDF2-derived key) before upload; the
+    // server stores only opaque ciphertext + a login-proof hash.
+    var SYNC_SERVER = '';
+
     var DB_NAME = 'maridew-web';
     var DB_VERSION = 1;
     var STORE_USERS = 'users';
@@ -145,6 +151,180 @@
         return bytesToHex(b);
     }
 
+    // ------------------------------------------------- cloud sync helpers
+    // Two keys from one password: authHex proves identity to the server;
+    // encKey never leaves this browser and encrypts every uploaded byte.
+    function deriveCloudKeys(username, password) {
+        var enc = new TextEncoder();
+        var name = String(username || '').trim().toLowerCase();
+        return crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits', 'deriveKey'])
+            .then(function (baseKey) {
+                return Promise.all([
+                    crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode('auth|' + name), iterations: 150000 }, baseKey, 256),
+                    crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode('enc|' + name), iterations: 150000 }, baseKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
+                ]);
+            }).then(function (res) {
+                return { authHex: bytesToHex(new Uint8Array(res[0])), encKey: res[1] };
+            });
+    }
+
+    function b64(bytes) {
+        var s = '';
+        new Uint8Array(bytes).forEach(function (b) { s += String.fromCharCode(b); });
+        return btoa(s);
+    }
+    function unb64(str) {
+        var s = atob(str), out = new Uint8Array(s.length);
+        for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+        return out;
+    }
+    function encryptPayload(encKey, obj) {
+        var iv = crypto.getRandomValues(new Uint8Array(12));
+        var data = new TextEncoder().encode(JSON.stringify(obj));
+        return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, encKey, data)
+            .then(function (ct) { return b64(iv) + ':' + b64(ct); });
+    }
+    function decryptPayload(encKey, blob) {
+        var parts = String(blob).split(':');
+        if (parts.length !== 2) return Promise.reject(new Error('Bad blob.'));
+        return crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(parts[0]) }, encKey, unb64(parts[1]))
+            .then(function (pt) { return JSON.parse(new TextDecoder().decode(pt)); });
+    }
+
+    function cloudApi(path, opts) {
+        return fetch(SYNC_SERVER + path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}))
+            .then(function (r) { return r.json()['catch'](function () { return { ok: false, error: 'Bad response from sync server.' }; }); });
+    }
+    function getCloudToken(uid) { return dbGet(STORE_KV, 'cloudtoken:' + uid).then(function (row) { return (row && row.token) || null; }); }
+    function saveCloudToken(uid, token) { return token ? dbPut(STORE_KV, { k: 'cloudtoken:' + uid, token: token }) : dbDelete(STORE_KV, 'cloudtoken:' + uid); }
+    function getCloudEncKey(uid) { return dbGet(STORE_KV, 'cloudenc:' + uid).then(function (row) { return (row && row.key) || null; }); }
+
+    // Local shell user so the app works offline; real validation is the
+    // server's. salt='cloud' marks accounts whose password is cloud-checked.
+    function getOrCreateLocalUser(username) {
+        return findUserByName(username).then(function (u) {
+            if (u) return u;
+            return openDb().then(function (d) {
+                return new Promise(function (resolve, reject) {
+                    var t = d.transaction(STORE_USERS, 'readwrite');
+                    var r = t.objectStore(STORE_USERS).add({
+                        username: username, usernameLower: username.toLowerCase(),
+                        salt: 'cloud', hash: 'cloud', createdAt: new Date().toISOString()
+                    });
+                    r.onsuccess = function () { resolve({ id: r.result, username: username }); };
+                    r.onerror = function () { reject(r.error); };
+                });
+            });
+        });
+    }
+
+    function markUserCloud(uid, authHex) {
+        return openDb().then(function (d) {
+            return new Promise(function (resolve, reject) {
+                var t = d.transaction(STORE_USERS, 'readwrite');
+                var r = t.objectStore(STORE_USERS).get(uid);
+                r.onsuccess = function () {
+                    var u = r.result;
+                    if (u) { u.salt = 'cloud'; u.authHash = authHex; t.objectStore(STORE_USERS).put(u); }
+                    resolve();
+                };
+                r.onerror = function () { reject(r.error); };
+            });
+        });
+    }
+
+    function pullCloudData(uid, encKey) {
+        return getCloudToken(uid).then(function (token) {
+            if (!token) return;
+            return cloudApi('/data', { headers: { Authorization: 'Bearer ' + token } }).then(function (res) {
+                if (!res.ok || !res.blob) return;
+                return decryptPayload(encKey, res.blob).then(function (payload) {
+                    var ops = TABLES.map(function (tb) {
+                        return dbPut(STORE_DATA, { k: dataKey(uid, tb), rows: (payload.tables && payload.tables[tb]) || [] });
+                    });
+                    if (payload.settings) ops.push(dbPut(STORE_KV, { k: settingsKey(uid), v: payload.settings }));
+                    return Promise.all(ops);
+                });
+            });
+        })['catch'](function () { /* offline: local cache stands */ });
+    }
+
+    var _pushTimer = null;
+    function scheduleCloudPush() {
+        if (!SYNC_SERVER) return;
+        if (_pushTimer) clearTimeout(_pushTimer);
+        _pushTimer = setTimeout(pushAllToCloud, 2500);
+    }
+    function pushAllToCloud() {
+        if (!SYNC_SERVER || !_currentUserId) return Promise.resolve();
+        var uid = _currentUserId;
+        return getCloudToken(uid).then(function (token) {
+            if (!token) return;
+            return dbBridge.LoadAll().then(function (allJson) {
+                return dbGet(STORE_KV, settingsKey(uid)).then(function (row) {
+                    var payload = { tables: JSON.parse(allJson), settings: (row && row.v) || {} };
+                    return getCloudEncKey(uid).then(function (encKey) {
+                        if (!encKey) return;
+                        return encryptPayload(encKey, payload).then(function (blob) {
+                            return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) });
+                        });
+                    });
+                });
+            });
+        })['catch'](function () { /* offline; retried on next save */ });
+    }
+
+    function cloudSignUp(username, pass) {
+        return deriveCloudKeys(username, pass).then(function (keys) {
+            return cloudApi('/signup', { method: 'POST', body: JSON.stringify({ username: username, authHash: keys.authHex }) });
+        }).then(function (res) {
+            if (!res.ok) return { ok: false, error: res.error || 'Sign-up failed.' };
+            return getOrCreateLocalUser(username).then(function (u) {
+                return saveCloudToken(u.id, res.token)
+                    .then(function () { return dbPut(STORE_KV, { k: 'cloudenc:' + u.id, key: keys.encKey }); })
+                    .then(function () { return markUserCloud(u.id, keys.authHex); })
+                    .then(function () { return { ok: true, userId: u.id }; });
+            });
+        })['catch'](function (e) { return { ok: false, error: (e && e.message) || 'Sync server unreachable.' }; });
+    }
+
+    function cloudSignIn(username, pass) {
+        return deriveCloudKeys(username, pass).then(function (keys) {
+            return cloudApi('/signin', { method: 'POST', body: JSON.stringify({ username: username, authHash: keys.authHex }) });
+        }).then(function (res) {
+            if (!res.ok) return { ok: false, error: res.error || 'Sign-in failed.' };
+            return getOrCreateLocalUser(username).then(function (u) {
+                return saveCloudToken(u.id, res.token)
+                    .then(function () { return dbPut(STORE_KV, { k: 'cloudenc:' + u.id, key: keys.encKey }); })
+                    .then(function () { return markUserCloud(u.id, keys.authHex); })
+                    .then(function () { return pullCloudData(u.id, keys.encKey); })
+                    .then(function () { return { ok: true, userId: u.id }; });
+            });
+        });
+    }
+
+    function changeCloudPassword(uid, user, currentPassword, newPassword) {
+        if (!newPassword || newPassword.length < 6) return Promise.resolve(fail('New password must be at least 6 characters.'));
+        if (currentPassword === newPassword) return Promise.resolve(fail('Choose a password different from the current one.'));
+        return deriveCloudKeys(user.username, currentPassword || '').then(function (oldKeys) {
+            if (oldKeys.authHex !== user.authHash) return fail('Current password is incorrect.');
+            return deriveCloudKeys(user.username, newPassword).then(function (newKeys) {
+                return getCloudToken(uid).then(function (token) {
+                    if (!token) return fail('Not signed in to the sync server.');
+                    return cloudApi('/password', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ newAuthHash: newKeys.authHex }) })
+                        .then(function (res) {
+                            if (!res.ok) return fail(res.error || 'Password change failed.');
+                            user.authHash = newKeys.authHex;
+                            return dbPut(STORE_USERS, user)
+                                .then(function () { return dbPut(STORE_KV, { k: 'cloudenc:' + uid, key: newKeys.encKey }); })
+                                .then(function () { return pushAllToCloud(); })
+                                .then(function () { return JSON.stringify({ ok: true }); });
+                        });
+                });
+            });
+        })['catch'](function (e) { return fail((e && e.message) || 'Password change failed.'); });
+    }
+
     // ---------------------------------------------------------------- users
     function findUserByName(username) {
         var lower = String(username || '').trim().toLowerCase();
@@ -230,7 +410,9 @@
     }
 
     function showAuthGate() {
-        var ui = baseOverlay('Maridew Finance', 'Browser edition - your data stays in this browser.');
+        var ui = baseOverlay('Maridew Finance', SYNC_SERVER
+            ? 'Browser edition - encrypted sync across your devices.'
+            : 'Browser edition - your data stays in this browser.');
         var card = ui.card;
 
         var tabs = el('div', 'flex gap-2 my-5');
@@ -251,7 +433,9 @@
         var go = busyBtn('Sign In');
         card.appendChild(go);
         card.appendChild(el('div', 'text-[11px] text-slate-500 mt-4 leading-relaxed',
-            'Accounts live in this browser only (IndexedDB) - the same username on another device is a separate account. Use Settings > Export to move data.'));
+            SYNC_SERVER
+                ? 'Accounts sync securely across devices. Data is encrypted in your browser before upload - the server can never read it.'
+                : 'Accounts live in this browser only (IndexedDB) - the same username on another device is a separate account. Use Settings > Export to move data.'));
 
         var mode = 'in';
         function setMode(m) {
@@ -302,6 +486,11 @@
         if (!username || username.length < 3) return Promise.resolve({ ok: false, error: 'Username must be at least 3 characters.' });
         if (!pass || pass.length < 6) return Promise.resolve({ ok: false, error: 'Password must be at least 6 characters.' });
         if (pass !== confirm) return Promise.resolve({ ok: false, error: 'Passwords do not match.' });
+        if (SYNC_SERVER) return cloudSignUp(username, pass);
+        return localCreateAccount(username, pass);
+    }
+
+    function localCreateAccount(username, pass) {
         return findUserByName(username).then(function (existing) {
             if (existing) return { ok: false, error: 'That username is already taken.' };
             var salt = newSalt();
@@ -325,6 +514,18 @@
     }
 
     function signIn(username, pass) {
+        if (SYNC_SERVER) {
+            return cloudSignIn(username, pass)['catch'](function (e) {
+                return localSignIn(username, pass).then(function (res) {
+                    if (res.ok) return res;
+                    return { ok: false, error: 'Sync server unreachable (' + ((e && e.message) || 'offline') + ') and no matching local account.' };
+                });
+            });
+        }
+        return localSignIn(username, pass);
+    }
+
+    function localSignIn(username, pass) {
         return findUserByName(username).then(function (u) {
             if (!u) return { ok: false, error: 'No account named "' + username + '" in THIS browser. Accounts live per-browser: new here? Tap "Create Account" to register, or use Settings > Export in the browser where your data lives.' };
             return hashPassword(pass, u.salt).then(function (hash) {
@@ -357,9 +558,17 @@
                 });
             }).then(function (user) {
                 u = user;
-                return hashPassword(passF.input.value, user.salt);
-            }).then(function (hash) {
-                if (hash === u.hash) {
+                if (user.salt === 'cloud') {
+                    // Cloud account: verify against the sync server.
+                    return cloudSignIn(user.username, passF.input.value).then(function (res) {
+                        return res.ok;
+                    })['catch'](function () { return false; });
+                }
+                return hashPassword(passF.input.value, user.salt).then(function (hash) {
+                    return hash === u.hash;
+                });
+            }).then(function (ok) {
+                if (ok) {
                     ui.wrap.remove();
                 } else {
                     err.textContent = 'Incorrect password.';
@@ -409,7 +618,9 @@
             return withUser(function (uid) {
             if (TABLES.indexOf(table) < 0) return Promise.reject(new Error("Unknown table '" + table + "'."));
             var rows = JSON.parse(jsonArrayJson);
-            return dbPut(STORE_DATA, { k: dataKey(uid, table), rows: rows }).then(function () { });
+            return dbPut(STORE_DATA, { k: dataKey(uid, table), rows: rows }).then(function () {
+                scheduleCloudPush();
+            });
             });
         },
         LoadSettings: function () {
@@ -447,6 +658,7 @@
                 });
             }).then(function (u) {
                 if (!u) return fail('Account not found.');
+                if (u.salt === 'cloud') return changeCloudPassword(uid, u, currentPassword, newPassword);
                 return hashPassword(currentPassword || '', u.salt).then(function (hash) {
                     if (hash !== u.hash) return fail('Current password is incorrect.');
                     if (!newPassword || newPassword.length < 6) return fail('New password must be at least 6 characters.');
