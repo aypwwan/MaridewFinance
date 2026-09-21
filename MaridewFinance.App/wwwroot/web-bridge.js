@@ -30,7 +30,7 @@
     // When set, accounts live on the sync Worker and data is AES-GCM
     // encrypted in THIS browser (PBKDF2-derived key) before upload; the
     // server stores only opaque ciphertext + a login-proof hash.
-    var SYNC_SERVER = '';
+    var SYNC_SERVER = 'https://maridew-sync.maridew.workers.dev';
 
     var DB_NAME = 'maridew-web';
     var DB_VERSION = 1;
