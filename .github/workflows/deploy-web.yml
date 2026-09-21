@@ -1,0 +1,49 @@
+name: Deploy web edition to GitHub Pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'MaridewFinance.App/wwwroot/**'
+      - '.github/workflows/deploy-web.yml'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The web edition is pure static files (no build step). Copy wwwroot to
+      # the artifact root so the site is served from the Pages domain root.
+      - name: Stage web files
+        shell: bash
+        run: |
+          mkdir -p _site
+          cp -r MaridewFinance.App/wwwroot/. _site/
+          echo "web edition files:"; find _site -type f | head -20
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

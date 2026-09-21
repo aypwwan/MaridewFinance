@@ -12,6 +12,10 @@
     <script src="vendor/lucide.js"></script>
     <!-- Local assets: Plus Jakarta Sans font (self-hosted) -->
     <link href="vendor/fonts.css" rel="stylesheet">
+    <!-- Browser-only bridge: no-ops inside WebView2, activates in a plain
+         browser so the SAME dashboard runs online with IndexedDB storage.
+         Must load before the main script (which probes hostObjects). -->
+    <script src="web-bridge.js"></script>
 
     <script>
         tailwind.config = {
@@ -176,7 +180,14 @@
                     <i data-lucide="menu" class="w-5 h-5"></i>
                 </button>
                 <div>
-                    <h2 id="page-title" class="text-lg lg:text-xl font-bold text-white tracking-tight">Overview Dashboard</h2>
+                    <div class="flex items-center gap-2">
+                        <h2 id="page-title" class="text-lg lg:text-xl font-bold text-white tracking-tight">Overview Dashboard</h2>
+                        <!-- Version badge: always visible, click to open update settings -->
+                        <button type="button" id="app-version-badge" onclick="switchTab('settings')" title="Current version - click to check for updates"
+                                class="hidden sm:inline-flex items-center rounded-full border border-slate-700/60 bg-slate-800/70 px-2 py-0.5 text-[10px] font-semibold text-slate-300 hover:border-indigo-500/50 hover:text-indigo-300 transition">
+                            v…
+                        </button>
+                    </div>
                     <p class="text-xs text-slate-400 hidden sm:block">Welcome back, here's your real-time financial health summary.</p>
                 </div>
             </div>
@@ -4042,6 +4053,7 @@ closeModal('categoryModal');
             statusEl.classList.toggle('text-rose-400', st.state === 'error');
             statusEl.classList.toggle('text-emerald-400', st.state === 'none' || st.state === 'ready');
             statusEl.classList.toggle('text-indigo-400', st.state === 'available' || st.state === 'downloading' || st.state === 'checking');
+            setVersionBadge(st.current || '');
             const curEl = document.getElementById('update-current-version');
             if (curEl) curEl.innerText = st.current || '1.0.0';
             const notesEl = document.getElementById('update-notes');
@@ -4051,6 +4063,15 @@ closeModal('categoryModal');
             const instBtn = document.getElementById('update-install-btn');
             if (instBtn) instBtn.classList.toggle('hidden', st.state !== 'ready');
             updateBanner(st);
+        }
+
+        // Header version badge: shows the running version at a glance.
+        // Optional accent lets the update banner logic tint it (unused yet).
+        function setVersionBadge(version, accent) {
+            const badge = document.getElementById('app-version-badge');
+            if (!badge) return;
+            if (version) badge.innerText = 'v' + version;
+            badge.classList.toggle('text-emerald-300', accent === 'green');
         }
 
         function updateBanner(st) {
