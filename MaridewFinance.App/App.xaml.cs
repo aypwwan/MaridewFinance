@@ -7,6 +7,7 @@ namespace MaridewFinance.App
         public static DbBridge? Bridge { get; private set; }
         public static AuthService? Auth { get; private set; }
         public static UpdateService? Updater { get; private set; }
+        public static CloudSyncService? CloudSync { get; private set; }
         public static string? CurrentUserName { get; private set; }
 
         /// <summary>Set by the bridge when the dashboard requests sign-out-to-login.</summary>
@@ -63,6 +64,7 @@ namespace MaridewFinance.App
             Auth = new AuthService();
             Bridge = new DbBridge();
             Updater = new UpdateService();
+            CloudSync = new CloudSyncService();
             ShowLoginAndOpenMain();
         }
 
@@ -81,6 +83,10 @@ namespace MaridewFinance.App
 
             Bridge!.SetCurrentUser(login.SignedInUserId);
             CurrentUserName = Auth!.GetUsername(login.SignedInUserId) ?? "Account Holder";
+
+            // Resume the zero-knowledge cloud link for this account, if one
+            // was enabled previously (starts the periodic pull loop).
+            CloudSync!.OnSignedIn(CurrentUserName);
 
             var main = new MainWindow();
             Current!.MainWindow = main;

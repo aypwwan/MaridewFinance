@@ -781,6 +781,42 @@
                     <p class="text-[11px] text-slate-500">Updates are downloaded from the update feed configured for this install and verified by checksum before installing. Windows will ask for permission when the update installs.</p>
                 </div>
 
+                <!-- Cloud Sync -->
+                <div id="cloudsync-card" class="glass-card rounded-2xl p-6 border border-slate-800 space-y-4">
+                    <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                        <div>
+                            <h3 class="font-bold text-base text-white flex items-center gap-2">
+                                <i data-lucide="cloud-upload" class="w-4 h-4 text-sky-400"></i>
+                                Cloud Sync
+                            </h3>
+                            <p class="text-xs text-slate-400 mt-0.5" id="cloudsync-status">Checking…</p>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button onclick="cloudSyncNow()" id="cloudsync-now-btn" class="hidden px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-medium border border-slate-700 transition flex items-center gap-2">
+                                <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                                <span>Sync Now</span>
+                            </button>
+                            <button onclick="cloudSyncToggle()" id="cloudsync-toggle-btn" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-indigo-600/30 transition flex items-center gap-2">
+                                <i data-lucide="link" class="w-3.5 h-3.5"></i>
+                                <span>Enable</span>
+                            </button>
+                        </div>
+                    </div>
+                    <form id="cloudsync-form" class="hidden rounded-xl border border-slate-800 bg-slate-900/40 p-4 space-y-3" onsubmit="cloudSyncSubmit(event)">
+                        <div>
+                            <label class="block text-slate-300 mb-1 font-medium text-xs">Cloud password</label>
+                            <input id="cloudsync-password" type="password" autocomplete="off" minlength="6" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-indigo-500" required>
+                        </div>
+                        <p class="text-[11px] text-slate-500">This is the password of your account on the Maridew web edition. Your data is encrypted in this app before upload — the server never sees your password or your data.</p>
+                        <p id="cloudsync-error" class="hidden text-[11px] text-rose-400"></p>
+                        <div class="flex justify-end gap-2">
+                            <button type="button" onclick="cloudSyncCancel()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition">Cancel</button>
+                            <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl transition font-semibold">Link Account</button>
+                        </div>
+                    </form>
+                    <p class="text-[11px] text-slate-500">When enabled, every change on this machine is encrypted and pushed to your cloud account automatically, and anything added on the web edition appears here within minutes (or on Sync Now). Same account works in any browser.</p>
+                </div>
+
                 <!-- App Lock (Privacy) -->
                 <div class="glass-card rounded-2xl p-6 border border-slate-800 space-y-4">
                     <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
@@ -1901,7 +1937,7 @@ closeModal('categoryModal');
             document.getElementById('page-title').innerText = titles[tabId] || 'Financial Dashboard';
 
             // Load backup list when the Settings tab opens
-            if (tabId === 'settings') refreshBackupList();
+            if (tabId === 'settings') { refreshBackupList(); refreshCloudSyncUI(); }
             if (tabId === 'accounts') renderAccountsTab();
 
             // Highlight nav button
@@ -4097,6 +4133,100 @@ closeModal('categoryModal');
             if (banner) banner.classList.add('hidden');
         }
 
+        // ----------------- CLOUD SYNC (desktop <-> web) -----------------
+        // Talks to the WPF host (window.chrome.webview.hostObjects.cloudBridge,
+        // CloudSyncService.cs). In the browser edition these helpers no-op:
+        // the web bridge pushes/pulls on its own.
+        const cloud = window.chrome?.webview?.hostObjects?.cloudBridge ?? null;
+
+        async function refreshCloudSyncUI() {
+            const card = document.getElementById('cloudsync-card');
+            if (!card) return;
+            if (!cloud) { card.classList.add('hidden'); return; }   // browser edition: syncs by itself
+            let st = {};
+            try { st = JSON.parse(await cloud.GetStatus()) || {}; } catch (e) { return; }
+            const status = document.getElementById('cloudsync-status');
+            const toggle = document.getElementById('cloudsync-toggle-btn');
+            const nowBtn = document.getElementById('cloudsync-now-btn');
+            if (!status || !toggle || !nowBtn) return;
+
+            if (st.enabled) {
+                let detail = st.lastPush || st.lastPull
+                    ? 'Last push ' + (st.lastPush || '—') + ' · last pull ' + (st.lastPull || '—')
+                    : 'Waiting for first sync…';
+                if (st.busy) detail = 'Syncing…';
+                if (st.lastError) detail = 'Sync error: ' + st.lastError;
+                status.innerText = 'Linked to cloud account “' + (st.username || '') + '”. ' + detail;
+                toggle.querySelector('span').innerText = 'Disable';
+                toggle.classList.remove('bg-indigo-600', 'hover:bg-indigo-500', 'shadow-indigo-600/30');
+                toggle.classList.add('bg-slate-800', 'hover:bg-slate-700');
+                nowBtn.classList.remove('hidden');
+            } else {
+                status.innerText = 'Link this account to the Maridew cloud to keep it in sync with the web edition — encrypted end to end.';
+                toggle.querySelector('span').innerText = 'Enable';
+                toggle.classList.add('bg-indigo-600', 'hover:bg-indigo-500', 'shadow-indigo-600/30');
+                toggle.classList.remove('bg-slate-800', 'hover:bg-slate-700');
+                nowBtn.classList.add('hidden');
+            }
+        }
+
+        function cloudSyncToggle() {
+            if (!cloud) return;
+            const form = document.getElementById('cloudsync-form');
+            if (!form) return;
+            if (!form.classList.contains('hidden')) { cloudSyncCancel(); return; }
+            cloud.GetStatus().then(function (s) {
+                let st = {};
+                try { st = JSON.parse(s) || {}; } catch (e) {}
+                if (st.enabled) {
+                    if (!confirm('Turn off cloud sync for this account?\n\nThe encrypted copy already on the server is kept; linking again re-merges it.')) return;
+                    cloud.Disable().then(function () { cloudSyncCancel(); refreshCloudSyncUI(); });
+                } else {
+                    form.classList.remove('hidden');
+                    const inp = document.getElementById('cloudsync-password');
+                    if (inp) inp.focus();
+                }
+            });
+        }
+
+        function cloudSyncCancel() {
+            const form = document.getElementById('cloudsync-form');
+            if (!form) return;
+            form.classList.add('hidden');
+            const inp = document.getElementById('cloudsync-password');
+            if (inp) inp.value = '';
+            const err = document.getElementById('cloudsync-error');
+            if (err) { err.classList.add('hidden'); err.innerText = ''; }
+        }
+
+        async function cloudSyncSubmit(ev) {
+            ev.preventDefault();
+            if (!cloud) return;
+            const inp = document.getElementById('cloudsync-password');
+            const err = document.getElementById('cloudsync-error');
+            const password = inp ? inp.value : '';
+            if (err) { err.classList.add('hidden'); err.innerText = ''; }
+            try {
+                const res = JSON.parse(await cloud.Enable(String(password))) || {};
+                if (!res.ok) {
+                    if (err) { err.innerText = res.error || 'Could not enable cloud sync.'; err.classList.remove('hidden'); }
+                    return;
+                }
+                cloudSyncCancel();
+                refreshCloudSyncUI();
+            } catch (e) {
+                if (err) { err.innerText = 'Could not enable cloud sync: ' + e.message; err.classList.remove('hidden'); }
+            }
+        }
+
+        async function cloudSyncNow() {
+            if (!cloud) return;
+            const status = document.getElementById('cloudsync-status');
+            if (status) status.innerText = 'Syncing…';
+            try { await cloud.SyncNowAsync(); } catch (e) { /* status refresh shows the error */ }
+            refreshCloudSyncUI();
+        }
+
         async function bannerAction() {
             if (!upd) return;
             let st = {};
@@ -4393,6 +4523,10 @@ closeModal('categoryModal');
                 try { setInterval(checkAutoLock, 15000); } catch (err) { /* non-fatal */ }
             }
             if (upd) upd.CheckForUpdates();
+            if (cloud) {
+                refreshCloudSyncUI();
+                setInterval(refreshCloudSyncUI, 5000);   // keeps Syncing…/timestamps fresh
+            }
         };
     </script>
 </body>

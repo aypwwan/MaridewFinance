@@ -233,23 +233,55 @@
         });
     }
 
+    function applyCloudPayload(uid, payload) {
+        var fp = JSON.stringify(payload && payload.tables);
+        var readOps = TABLES.map(function (tb) {
+            return dbGet(STORE_DATA, dataKey(uid, tb)).then(function (row) { return { tb: tb, rows: (row && row.rows) || [] }; });
+        });
+        return Promise.all(readOps).then(function (locals) {
+            var changed = false;
+            var ops = locals.map(function (t) {
+                var cloudRows = (payload.tables && payload.tables[t.tb]) || [];
+                var merged = mergeRowsById(t.rows, cloudRows);
+                if (JSON.stringify(merged) !== JSON.stringify(t.rows)) changed = true;
+                return dbPut(STORE_DATA, { k: dataKey(uid, t.tb), rows: merged });
+            });
+            if (payload.settings) ops.push(dbPut(STORE_KV, { k: settingsKey(uid), v: payload.settings }));
+            return Promise.all(ops).then(function () {
+                _lastAppliedFp = fp;    // stop re-processing this exact payload
+                return changed;
+            });
+        });
+    }
+
+    // Union of local + cloud rows by id; the cloud copy wins conflicts (it is
+    // the union computed by whichever device pushed last, or a newer edit).
+    function mergeRowsById(localRows, cloudRows) {
+        var seen = {};
+        var out = [];
+        (cloudRows || []).forEach(function (r) {
+            if (r && r.id != null) { seen[r.id] = true; out.push(r); }
+        });
+        (localRows || []).forEach(function (r) {
+            if (r && r.id != null && !seen[r.id]) out.push(r);
+        });
+        return out;
+    }
+
     function pullCloudData(uid, encKey) {
         return getCloudToken(uid).then(function (token) {
             if (!token) return;
             return cloudApi('/data', { headers: { Authorization: 'Bearer ' + token } }).then(function (res) {
                 if (!res.ok || !res.blob) return;
                 return decryptPayload(encKey, res.blob).then(function (payload) {
-                    var ops = TABLES.map(function (tb) {
-                        return dbPut(STORE_DATA, { k: dataKey(uid, tb), rows: (payload.tables && payload.tables[tb]) || [] });
-                    });
-                    if (payload.settings) ops.push(dbPut(STORE_KV, { k: settingsKey(uid), v: payload.settings }));
-                    return Promise.all(ops);
+                    return applyCloudPayload(uid, payload);
                 });
             });
         })['catch'](function () { /* offline: local cache stands */ });
     }
 
     var _pushTimer = null;
+    var _lastAppliedFp = null;   // payload fingerprint already merged/applied
     function scheduleCloudPush() {
         if (!SYNC_SERVER) return;
         if (_pushTimer) clearTimeout(_pushTimer);
@@ -266,7 +298,11 @@
                     return getCloudEncKey(uid).then(function (encKey) {
                         if (!encKey) return;
                         return encryptPayload(encKey, payload).then(function (blob) {
-                            return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) });
+                            return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) }).then(function (res) {
+                                if (res && res.ok) {
+                                    _lastAppliedFp = JSON.stringify(payload.tables);   // server now holds exactly this
+                                }
+                            });
                         });
                     });
                 });
@@ -797,9 +833,12 @@
         // and patch the page-level lookups below.
     }
 
+    var _pollerStarted = false;
+    var _lastBlobStr = null;
+
     function boot() {
         loadSession().then(function (uid) {
-            if (uid) return;                 // signed in: page loads normally
+            if (uid) { startCloudPoller(uid); return; }   // signed in: page loads normally
             showAuthGate();                  // not signed in: show the gate
         })['catch'](function () { showAuthGate(); });
     }
@@ -807,5 +846,36 @@
         document.addEventListener('DOMContentLoaded', boot);
     } else {
         boot();
+    }
+
+    // ------------------------------------------------ desktop → web pull loop
+    // The desktop app pushes its whole encrypted database after every change;
+    // this poller merges new cloud payloads into this browser and nudges the
+    // dashboard to re-render when desktop entries actually arrived.
+    function startCloudPoller(uid) {
+        if (_pollerStarted) return;
+        _pollerStarted = true;
+        setInterval(function () {
+            if (document.hidden) return;                 // skip when tab not visible
+            getCloudToken(uid).then(function (token) {
+                if (!token) return;
+                cloudApi('/data', { headers: { Authorization: 'Bearer ' + token } }).then(function (res) {
+                    if (!res.ok || !res.blob) return;
+                    var fp = JSON.stringify(res.blob);   // cheap pre-decrypt change check
+                    if (fp === _lastBlobStr) return;
+                    _lastBlobStr = fp;
+                    return getCloudEncKey(uid).then(function (encKey) {
+                        if (!encKey) return;
+                        return decryptPayload(encKey, res.blob).then(function (payload) {
+                            return applyCloudPayload(uid, payload).then(function (changed) {
+                                if (changed) {
+                                    window.location.reload();            // re-render from merged cache
+                                }
+                            });
+                        });
+                    });
+                });
+            })['catch'](function () { /* offline: try again next tick */ });
+        }, 20000);
     }
 })();

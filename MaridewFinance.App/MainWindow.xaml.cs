@@ -49,11 +49,15 @@ namespace MaridewFinance.App
                 var env = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
                 await Browser.EnsureCoreWebView2Async(env);
 
-                // Expose the app's SQLite bridge (scoped to the signed-in user)
-                // and the auto-update service to the dashboard JavaScript as
-                // window.chrome.webview.hostObjects.dbBridge / .updateBridge
+                // Expose the app's SQLite bridge (scoped to the signed-in user),
+                // the auto-update service and the cloud-sync service to the
+                // dashboard JavaScript as window.chrome.webview.hostObjects.*
                 Browser.CoreWebView2.AddHostObjectToScript("dbBridge", App.Bridge!);
                 Browser.CoreWebView2.AddHostObjectToScript("updateBridge", App.Updater!);
+                if (App.CloudSync != null)
+                {
+                    Browser.CoreWebView2.AddHostObjectToScript("cloudBridge", App.CloudSync);
+                }
 
                 // Load the bundled dashboard (copied to the output directory as wwwroot/index.html)
                 var htmlPath = Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html");

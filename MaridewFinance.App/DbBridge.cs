@@ -84,6 +84,7 @@ namespace MaridewFinance.App
                 cmd.Parameters.AddWithValue("$k", key);
                 cmd.Parameters.AddWithValue("$v", value ?? "");
                 cmd.ExecuteNonQuery();
+                App.CloudSync?.SchedulePush();          // settings sync to the cloud too
                 return JsonSerializer.Serialize(new { ok = true });
             }
             catch (Exception ex)
@@ -153,6 +154,12 @@ namespace MaridewFinance.App
             try
             {
                 var (ok, error) = auth.ChangePassword(_currentUserId, currentPassword, newPassword);
+                if (ok)
+                {
+                    // Keep the zero-knowledge cloud link working: re-encrypt the
+                    // cloud blob under the new password and update its auth proof.
+                    _ = App.CloudSync?.OnPasswordChangedAsync(currentPassword, newPassword);
+                }
                 return ok
                     ? JsonSerializer.Serialize(new { ok = true })
                     : JsonSerializer.Serialize(new { ok = false, error });
@@ -777,6 +784,9 @@ namespace MaridewFinance.App
             }
 
             tx.Commit();
+
+            // Local save landed: schedule a debounced encrypted cloud push.
+            App.CloudSync?.SchedulePush();
         }
     }
 }
