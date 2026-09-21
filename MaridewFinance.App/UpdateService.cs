@@ -38,7 +38,7 @@ namespace MaridewFinance.App
     public class UpdateService
     {
         /// <summary>Keep in sync with the &lt;Version&gt; in MaridewFinance.App.csproj.</summary>
-        public const string CurrentVersion = "1.0.2";
+        public const string CurrentVersion = "1.0.3";
 
         /// <summary>
         /// Where the update feed lives. When GitHubRepo is set (owner/repo),

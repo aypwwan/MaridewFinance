@@ -24,7 +24,7 @@
     if (host && (host.dbBridge || host.updateBridge)) { return; }
 
     // Keep in sync with UpdateService.CurrentVersion (v-bump: release day).
-    var WEB_VERSION = '1.0.2';
+    var WEB_VERSION = '1.0.3';
 
     var DB_NAME = 'maridew-web';
     var DB_VERSION = 1;
