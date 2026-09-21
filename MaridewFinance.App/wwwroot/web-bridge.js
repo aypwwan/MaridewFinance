@@ -297,11 +297,26 @@
                     var payload = { tables: JSON.parse(allJson), settings: (row && row.v) || {} };
                     return getCloudEncKey(uid).then(function (encKey) {
                         if (!encKey) return;
-                        return encryptPayload(encKey, payload).then(function (blob) {
-                            return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) }).then(function (res) {
-                                if (res && res.ok) {
-                                    _lastAppliedFp = JSON.stringify(payload.tables);   // server now holds exactly this
-                                }
+                        // Pull-merge BEFORE pushing: this browser's snapshot may be
+                        // stale (rows deleted here can still exist in the cloud from
+                        // another device). Merging first prevents resurrecting them.
+                        return cloudApi('/data', { headers: { Authorization: 'Bearer ' + token } }).then(function (cur) {
+                            if (cur && cur.ok && cur.blob) {
+                                return decryptPayload(encKey, cur.blob).then(function (cloudPayload) {
+                                    return applyCloudPayload(uid, cloudPayload).then(function () {
+                                        return dbBridge.LoadAll().then(function (freshJson) {
+                                            payload.tables = JSON.parse(freshJson);
+                                        });
+                                    });
+                                });
+                            }
+                        }).then(function () {
+                            return encryptPayload(encKey, payload).then(function (blob) {
+                                return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) }).then(function (res) {
+                                    if (res && res.ok) {
+                                        _lastAppliedFp = JSON.stringify(payload.tables);   // server now holds exactly this
+                                    }
+                                });
                             });
                         });
                     });
