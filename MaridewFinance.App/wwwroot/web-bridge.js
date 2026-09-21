@@ -276,30 +276,32 @@
 
     function cloudSignUp(username, pass) {
         return deriveCloudKeys(username, pass).then(function (keys) {
-            return cloudApi('/signup', { method: 'POST', body: JSON.stringify({ username: username, authHash: keys.authHex }) });
-        }).then(function (res) {
-            if (!res.ok) return { ok: false, error: res.error || 'Sign-up failed.' };
-            return getOrCreateLocalUser(username).then(function (u) {
-                return saveCloudToken(u.id, res.token)
-                    .then(function () { return dbPut(STORE_KV, { k: 'cloudenc:' + u.id, key: keys.encKey }); })
-                    .then(function () { return markUserCloud(u.id, keys.authHex); })
-                    .then(function () { return { ok: true, userId: u.id }; });
-            });
+            return cloudApi('/signup', { method: 'POST', body: JSON.stringify({ username: username, authHash: keys.authHex }) })
+                .then(function (res) {
+                    if (!res.ok) return { ok: false, error: res.error || 'Sign-up failed.' };
+                    return getOrCreateLocalUser(username).then(function (u) {
+                        return saveCloudToken(u.id, res.token)
+                            .then(function () { return dbPut(STORE_KV, { k: 'cloudenc:' + u.id, key: keys.encKey }); })
+                            .then(function () { return markUserCloud(u.id, keys.authHex); })
+                            .then(function () { return { ok: true, userId: u.id }; });
+                    });
+                });
         })['catch'](function (e) { return { ok: false, error: (e && e.message) || 'Sync server unreachable.' }; });
     }
 
     function cloudSignIn(username, pass) {
         return deriveCloudKeys(username, pass).then(function (keys) {
-            return cloudApi('/signin', { method: 'POST', body: JSON.stringify({ username: username, authHash: keys.authHex }) });
-        }).then(function (res) {
-            if (!res.ok) return { ok: false, error: res.error || 'Sign-in failed.' };
-            return getOrCreateLocalUser(username).then(function (u) {
-                return saveCloudToken(u.id, res.token)
-                    .then(function () { return dbPut(STORE_KV, { k: 'cloudenc:' + u.id, key: keys.encKey }); })
-                    .then(function () { return markUserCloud(u.id, keys.authHex); })
-                    .then(function () { return pullCloudData(u.id, keys.encKey); })
-                    .then(function () { return { ok: true, userId: u.id }; });
-            });
+            return cloudApi('/signin', { method: 'POST', body: JSON.stringify({ username: username, authHash: keys.authHex }) })
+                .then(function (res) {
+                    if (!res.ok) return { ok: false, error: res.error || 'Sign-in failed.' };
+                    return getOrCreateLocalUser(username).then(function (u) {
+                        return saveCloudToken(u.id, res.token)
+                            .then(function () { return dbPut(STORE_KV, { k: 'cloudenc:' + u.id, key: keys.encKey }); })
+                            .then(function () { return markUserCloud(u.id, keys.authHex); })
+                            .then(function () { return pullCloudData(u.id, keys.encKey); })
+                            .then(function () { return { ok: true, userId: u.id }; });
+                    });
+                });
         });
     }
 
