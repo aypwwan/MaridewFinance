@@ -300,8 +300,8 @@ namespace MaridewFinance.App
                     var payload = DecodeBlob(blobStr, encKey);
                     if (payload == null)
                     {
-                        SetError("Could not decrypt cloud data (wrong password?).");
-                        return Fail("Could not decrypt cloud data (wrong password?).");
+                        SetError("Cloud password changed on another device - Disable, then Enable with your current cloud password to re-link.");
+                        return Fail("Cloud password changed on another device - Disable, then Enable with your current cloud password to re-link.");
                     }
                     if (cloudChanged)
                     {
