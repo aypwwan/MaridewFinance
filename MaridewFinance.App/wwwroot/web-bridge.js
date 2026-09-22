@@ -364,15 +364,31 @@
             return deriveCloudKeys(user.username, newPassword).then(function (newKeys) {
                 return getCloudToken(uid).then(function (token) {
                     if (!token) return fail('Not signed in to the sync server.');
-                    return cloudApi('/password', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ newAuthHash: newKeys.authHex }) })
-                        .then(function (res) {
-                            if (!res.ok) return fail(res.error || 'Password change failed.');
-                            user.authHash = newKeys.authHex;
-                            return dbPut(STORE_USERS, user)
-                                .then(function () { return dbPut(STORE_KV, { k: 'cloudenc:' + uid, key: newKeys.encKey }); })
-                                .then(function () { return pushAllToCloud(); })
-                                .then(function () { return JSON.stringify({ ok: true }); });
+                    // SAFE ORDER (mirrors the desktop): re-encrypt the cloud data
+                    // under the new key FIRST, swap the local enc key, and update
+                    // the server login hash LAST. A failure mid-way leaves the
+                    // account consistent with the OLD password instead of
+                    // stranding the data under a key nobody can derive.
+                    return pullCloudData(uid, oldKeys.encKey).then(function () {
+                        return dbBridge.LoadAll().then(function (allJson) {
+                            return dbGet(STORE_KV, settingsKey(uid)).then(function (row) {
+                                var payload = { tables: JSON.parse(allJson), settings: (row && row.v) || {} };
+                                return encryptPayload(newKeys.encKey, payload).then(function (blob) {
+                                    return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) });
+                                });
+                            });
                         });
+                    }).then(function (put) {
+                        if (!put || !put.ok) return fail((put && put.error) || 'Data re-encryption failed - your password was left unchanged.');
+                        return dbPut(STORE_KV, { k: 'cloudenc:' + uid, key: newKeys.encKey }).then(function () {
+                            return cloudApi('/password', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ newAuthHash: newKeys.authHex }) }).then(function (res) {
+                                if (!res.ok) return fail(res.error || 'Password update failed - please try again to complete the change.');
+                                user.authHash = newKeys.authHex;
+                                return dbPut(STORE_USERS, user)
+                                    .then(function () { return JSON.stringify({ ok: true }); });
+                            });
+                        });
+                    });
                 });
             });
         })['catch'](function (e) { return fail((e && e.message) || 'Password change failed.'); });
