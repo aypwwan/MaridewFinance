@@ -71,7 +71,13 @@ jobs:
             exit 1
           }
 
-          Write-Host "Version $version verified in csproj and UpdateService."
+          $webBridge = Get-Content 'MaridewFinance.App/wwwroot/web-bridge.js' -Raw
+          if ($webBridge -notmatch [regex]::Escape("WEB_VERSION = '$version'")) {
+            Write-Error "web-bridge.js WEB_VERSION does not match $version. Bump WEB_VERSION first."
+            exit 1
+          }
+
+          Write-Host "Version $version verified in csproj, UpdateService, and web-bridge."
 
       - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
