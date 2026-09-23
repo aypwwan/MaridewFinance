@@ -85,6 +85,7 @@
 
     function dataKey(uid, table) { return uid + ':' + table; }
     function settingsKey(uid) { return uid + ':settings'; }
+    function tombstonesKey(uid) { return uid + ':tombstones'; }   // {"table":{"id":deletedAtIso}}
 
     function requireUser() {
         if (!_currentUserId) throw new Error('No user is signed in.');
@@ -97,6 +98,55 @@
     }
 
     function fail(msg) { return JSON.stringify({ ok: false, error: msg }); }
+
+    // ------------------------------------------------------------- tombstones
+    // Deletion log so removed rows stay removed on every device: union merges
+    // skip tombstoned ids, and the log rides inside the encrypted payload.
+    var TOMBSTONE_RETENTION_DAYS = 30;
+
+    function getTombstones(uid) {
+        return dbGet(STORE_KV, tombstonesKey(uid)).then(function (row) {
+            return (row && row.v) || {};
+        });
+    }
+    function putTombstones(uid, tombs) {
+        return dbPut(STORE_KV, { k: tombstonesKey(uid), v: tombs });
+    }
+    function recordTombstones(tombs, table, ids, at) {
+        var per = tombs[table] || {};
+        ids.forEach(function (id) {
+            var key = String(id);
+            if (!per[key] || String(per[key]) < at) per[key] = at;
+        });
+        tombs[table] = per;
+    }
+    function mergeTombstones(base, incoming) {
+        Object.keys(incoming || {}).forEach(function (table) {
+            var per = base[table] || {};
+            Object.keys(incoming[table]).forEach(function (id) {
+                var at = incoming[table][id];
+                if (!per[id] || String(per[id]) < String(at)) per[id] = at;
+            });
+            base[table] = per;
+        });
+        return base;
+    }
+    function pruneTombstones(tombs, maxAgeDays) {
+        var cutoff = Date.now() - maxAgeDays * 86400000;
+        Object.keys(tombs).forEach(function (table) {
+            var per = tombs[table];
+            Object.keys(per).forEach(function (id) {
+                var t = Date.parse(per[id]);
+                if (isNaN(t) || t < cutoff) delete per[id];
+            });
+            if (!Object.keys(per).length) delete tombs[table];
+        });
+        return tombs;
+    }
+    function tombstonedIds(tombs, table) {
+        var per = tombs[table] || {};
+        return Object.keys(per).map(Number);
+    }
 
     // --------------------------------------------------------------- crypto
     function bytesToHex(b) {
@@ -235,35 +285,59 @@
 
     function applyCloudPayload(uid, payload) {
         var fp = JSON.stringify(payload && payload.tables);
+        var incomingTombs = (payload && payload.tombstones) || {};
         var readOps = TABLES.map(function (tb) {
             return dbGet(STORE_DATA, dataKey(uid, tb)).then(function (row) { return { tb: tb, rows: (row && row.rows) || [] }; });
         });
         return Promise.all(readOps).then(function (locals) {
-            var changed = false;
-            var ops = locals.map(function (t) {
-                var cloudRows = (payload.tables && payload.tables[t.tb]) || [];
-                var merged = mergeRowsById(t.rows, cloudRows);
-                if (JSON.stringify(merged) !== JSON.stringify(t.rows)) changed = true;
-                return dbPut(STORE_DATA, { k: dataKey(uid, t.tb), rows: merged });
-            });
-            if (payload.settings) ops.push(dbPut(STORE_KV, { k: settingsKey(uid), v: payload.settings }));
-            return Promise.all(ops).then(function () {
-                _lastAppliedFp = fp;    // stop re-processing this exact payload
-                return changed;
+            return getTombstones(uid).then(function (localTombs) {
+                var mergedTombs = mergeTombstones(JSON.parse(JSON.stringify(localTombs)), incomingTombs);
+                pruneTombstones(mergedTombs, TOMBSTONE_RETENTION_DAYS);
+                var changed = false;
+                var ops = locals.map(function (t) {
+                    var cloudRows = (payload.tables && payload.tables[t.tb]) || [];
+                    var merged = mergeRowsById(t.rows, cloudRows, mergedTombs[t.tb] || {});
+                    if (JSON.stringify(merged) !== JSON.stringify(t.rows)) changed = true;
+                    return dbPut(STORE_DATA, { k: dataKey(uid, t.tb), rows: merged });
+                });
+                ops.push(putTombstones(uid, mergedTombs));
+                if (payload.settings) {
+                    ops.push(dbGet(STORE_KV, settingsKey(uid)).then(function (row) {
+                        var cur = (row && row.v) || {};
+                        if (JSON.stringify(cur) !== JSON.stringify(payload.settings)) {
+                            changed = true;
+                            return dbPut(STORE_KV, { k: settingsKey(uid), v: payload.settings });   // cloud wins
+                        }
+                    }));
+                }
+                return Promise.all(ops).then(function () {
+                    _lastAppliedFp = fp;    // stop re-processing this exact payload
+                    return changed;
+                });
             });
         });
     }
 
-    // Union of local + cloud rows by id; the cloud copy wins conflicts (it is
-    // the union computed by whichever device pushed last, or a newer edit).
-    function mergeRowsById(localRows, cloudRows) {
+    // Union of local + cloud rows by id, honoring the deletion log: rows
+    // whose id is tombstoned are dropped from BOTH sides (a deleted row stays
+    // deleted; the cloud copy wins conflicts for everything else).
+    function mergeRowsById(localRows, cloudRows, tombstones) {
+        var tombs = tombstones || {};
         var seen = {};
         var out = [];
         (cloudRows || []).forEach(function (r) {
-            if (r && r.id != null) { seen[r.id] = true; out.push(r); }
+            if (r && r.id != null) {
+                var key = String(r.id);
+                if (tombs[key]) return;              // deleted: never resurrect
+                seen[key] = true;
+                out.push(r);
+            }
         });
         (localRows || []).forEach(function (r) {
-            if (r && r.id != null && !seen[r.id]) out.push(r);
+            if (r && r.id != null && !seen[String(r.id)]) {
+                if (tombs[String(r.id)]) return;     // locally tombstoned by another device: drop
+                out.push(r);
+            }
         });
         return out;
     }
@@ -294,28 +368,31 @@
             if (!token) return;
             return dbBridge.LoadAll().then(function (allJson) {
                 return dbGet(STORE_KV, settingsKey(uid)).then(function (row) {
-                    var payload = { tables: JSON.parse(allJson), settings: (row && row.v) || {} };
-                    return getCloudEncKey(uid).then(function (encKey) {
-                        if (!encKey) return;
-                        // Pull-merge BEFORE pushing: this browser's snapshot may be
-                        // stale (rows deleted here can still exist in the cloud from
-                        // another device). Merging first prevents resurrecting them.
-                        return cloudApi('/data', { headers: { Authorization: 'Bearer ' + token } }).then(function (cur) {
-                            if (cur && cur.ok && cur.blob) {
-                                return decryptPayload(encKey, cur.blob).then(function (cloudPayload) {
-                                    return applyCloudPayload(uid, cloudPayload).then(function () {
-                                        return dbBridge.LoadAll().then(function (freshJson) {
-                                            payload.tables = JSON.parse(freshJson);
+                    return getTombstones(uid).then(function (tombs) {
+                        var payload = { tables: JSON.parse(allJson), settings: (row && row.v) || {}, tombstones: pruneTombstones(tombs, TOMBSTONE_RETENTION_DAYS) };
+                        return getCloudEncKey(uid).then(function (encKey) {
+                            if (!encKey) return;
+                            // Pull-merge BEFORE pushing: this browser's snapshot may be
+                            // stale (rows deleted here can still exist in the cloud from
+                            // another device). Merging first prevents resurrecting them.
+                            return cloudApi('/data', { headers: { Authorization: 'Bearer ' + token } }).then(function (cur) {
+                                if (cur && cur.ok && cur.blob) {
+                                    return decryptPayload(encKey, cur.blob).then(function (cloudPayload) {
+                                        return applyCloudPayload(uid, cloudPayload).then(function () {
+                                            return Promise.all([dbBridge.LoadAll(), getTombstones(uid)]).then(function (results) {
+                                                payload.tables = JSON.parse(results[0]);
+                                                payload.tombstones = pruneTombstones(results[1], TOMBSTONE_RETENTION_DAYS);
+                                            });
                                         });
                                     });
-                                });
-                            }
-                        }).then(function () {
-                            return encryptPayload(encKey, payload).then(function (blob) {
-                                return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) }).then(function (res) {
-                                    if (res && res.ok) {
-                                        _lastAppliedFp = JSON.stringify(payload.tables);   // server now holds exactly this
-                                    }
+                                }
+                            }).then(function () {
+                                return encryptPayload(encKey, payload).then(function (blob) {
+                                    return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) }).then(function (res) {
+                                        if (res && res.ok) {
+                                            _lastAppliedFp = JSON.stringify(payload.tables);   // server now holds exactly this
+                                        }
+                                    });
                                 });
                             });
                         });
@@ -370,12 +447,10 @@
                     // account consistent with the OLD password instead of
                     // stranding the data under a key nobody can derive.
                     return pullCloudData(uid, oldKeys.encKey).then(function () {
-                        return dbBridge.LoadAll().then(function (allJson) {
-                            return dbGet(STORE_KV, settingsKey(uid)).then(function (row) {
-                                var payload = { tables: JSON.parse(allJson), settings: (row && row.v) || {} };
-                                return encryptPayload(newKeys.encKey, payload).then(function (blob) {
-                                    return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) });
-                                });
+                        return Promise.all([dbBridge.LoadAll(), dbGet(STORE_KV, settingsKey(uid)), getTombstones(uid)]).then(function (results) {
+                            var payload = { tables: JSON.parse(results[0]), settings: (results[1] && results[1].v) || {}, tombstones: pruneTombstones(results[2] || {}, TOMBSTONE_RETENTION_DAYS) };
+                            return encryptPayload(newKeys.encKey, payload).then(function (blob) {
+                                return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) });
                             });
                         });
                     }).then(function (put) {
@@ -687,8 +762,33 @@
             return withUser(function (uid) {
             if (TABLES.indexOf(table) < 0) return Promise.reject(new Error("Unknown table '" + table + "'."));
             var rows = JSON.parse(jsonArrayJson);
-            return dbPut(STORE_DATA, { k: dataKey(uid, table), rows: rows }).then(function () {
-                scheduleCloudPush();
+            // Diff against the stored rows first: any previously-seen id that
+            // is now missing was deleted by the page — tombstone it so the
+            // deletion survives union merges on other devices.
+            return dbGet(STORE_DATA, dataKey(uid, table)).then(function (prev) {
+                var before = (prev && prev.rows) || [];
+                var nowIds = {};
+                rows.forEach(function (r) { if (r && r.id != null) nowIds[String(r.id)] = true; });
+                var removed = [];
+                var readded = [];
+                before.forEach(function (r) {
+                    if (!r || r.id == null) return;
+                    var key = String(r.id);
+                    if (!nowIds[key]) removed.push(r.id);
+                });
+                return getTombstones(uid).then(function (tombs) {
+                    rows.forEach(function (r) {
+                        if (r && r.id != null && tombstonedIds(tombs, table).indexOf(Number(r.id)) >= 0) readded.push(r.id);
+                    });
+                    var at = new Date().toISOString();
+                    if (removed.length) recordTombstones(tombs, table, removed, at);
+                    readded.forEach(function (id) { delete (tombs[table] || {})[String(id)]; });
+                    return putTombstones(uid, tombs).then(function () {
+                        return dbPut(STORE_DATA, { k: dataKey(uid, table), rows: rows }).then(function () {
+                            scheduleCloudPush();
+                        });
+                    });
+                });
             });
             });
         },

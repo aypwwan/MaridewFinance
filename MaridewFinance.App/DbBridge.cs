@@ -25,12 +25,21 @@ namespace MaridewFinance.App
         private readonly string _dbPath;
         private int _currentUserId;
 
+        // Last row ids seen per table — lets SaveTable detect deletions so
+        // they become sync tombstones (deleted rows must stay deleted).
+        private readonly object _lastSeenGate = new();
+        private readonly Dictionary<string, HashSet<long>> _lastSeenIds = new();
+
         /// <summary>Id of the signed-in user (0 when none) — used by the lock screen.</summary>
         public int CurrentUserId => _currentUserId;
 
         /// <summary>Sets whose data this bridge serves (called after sign-in).</summary>
         public void SetCurrentUser(int userId)
         {
+            if (userId != _currentUserId)
+            {
+                _lastSeenIds.Clear();   // baselines are per-user; re-prime on switch
+            }
             _currentUserId = userId;
         }
 
@@ -718,11 +727,33 @@ namespace MaridewFinance.App
                 }
                 result[table] = rows;
             }
+
+            // Prime deletion baselines after the initial page load (and re-prime
+            // after a sync-triggered reload) so a page-driven save can diff
+            // against what was actually on screen when it fires.
+            lock (_lastSeenGate)
+            {
+                foreach (var (table, rowsObj) in result)
+                {
+                    if (rowsObj is List<Dictionary<string, object>> list)
+                    {
+                        var ids = new HashSet<long>();
+                        foreach (var row in list)
+                        {
+                            if (row["id"] is long l) ids.Add(l);
+                            else if (row["id"] is int i) ids.Add(i);
+                        }
+                        _lastSeenIds[table] = ids;
+                    }
+                }
+            }
+
             return JsonSerializer.Serialize(result);
         }
 
         /// <summary>Replaces the contents of one table with the supplied JSON array.</summary>
-        public void SaveTable(string table, string jsonArrayJson)
+        /// <param name="fromSync">True for cloud-merge-driven writes: they neither create nor clear tombstones.</param>
+        public void SaveTable(string table, string jsonArrayJson, bool fromSync = false)
         {
             if (!Tables.TryGetValue(table, out var def))
             {
@@ -784,6 +815,45 @@ namespace MaridewFinance.App
             }
 
             tx.Commit();
+
+            // Deletion detection: any previously-seen id missing from this
+            // replacement was deleted by the page — tombstone it so cloud
+            // sync keeps it deleted on other devices.
+            try
+            {
+                var incomingIds = new HashSet<long>();
+                foreach (var element in doc.RootElement.EnumerateArray())
+                {
+                    if (element.TryGetProperty("id", out var idEl) &&
+                        (idEl.TryGetInt64(out var iid)))
+                    {
+                        incomingIds.Add(iid);
+                    }
+                }
+                List<long>? priorIds = null;
+                lock (_lastSeenGate)
+                {
+                    if (_lastSeenIds.TryGetValue(table, out var snapshot))
+                    {
+                        priorIds = snapshot.Where(id => !incomingIds.Contains(id)).ToList();
+                    }
+                    _lastSeenIds[table] = incomingIds;
+                }
+                if (fromSync)
+                {
+                    return;   // merge-driven writes neither create nor clear tombstones
+                }
+                if (priorIds is { Count: > 0 })
+                {
+                    App.CloudSync?.RecordDeletions(table, priorIds);
+                }
+                var readded = incomingIds.Where(id => App.CloudSync?.IsTombstoned(table, id) == true).ToList();
+                if (readded.Count > 0)
+                {
+                    App.CloudSync?.ClearTombstones(table, readded);
+                }
+            }
+            catch { /* tombstone bookkeeping must never break a save */ }
 
             // Local save landed: schedule a debounced encrypted cloud push.
             App.CloudSync?.SchedulePush();

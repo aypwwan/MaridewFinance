@@ -61,6 +61,12 @@ namespace MaridewFinance.App
         private volatile bool _busy;
         private volatile bool _syncInProgress;
 
+        // Deletions detected by DbBridge.SaveTable diffs during page-driven
+        // saves (outside a pull). Drained into the payload on the next push.
+        private readonly object _sessionGate = new();
+        private Dictionary<string, Dictionary<long, string>> _sessionTombstones = new();
+        private string _tombstonesInFlight = "{}";
+
         private sealed class CloudState
         {
             public string Username { get; set; } = "";
@@ -73,6 +79,7 @@ namespace MaridewFinance.App
             public string LastError { get; set; } = "";
             public string LastPushFingerprint { get; set; } = "";   // sha256 of last uploaded payload
             public bool PendingReload { get; set; }                  // pull merged new data; page should reload
+            public string TombstonesJson { get; set; } = "{}";       // {"table":{"id":deletedAtIso}} — deletions that must propagate
         }
 
         public CloudSyncService()
@@ -212,7 +219,8 @@ namespace MaridewFinance.App
                         LinkedDesktopUser = desktopUser,
                         Token = token,
                         EncKey = Convert.ToBase64String(encKey),
-                        LastError = ""
+                        LastError = "",
+                        TombstonesJson = "{}"   // fresh link: the merge below re-derives deletions from the cloud log
                     };
                 }
                 SaveState();
@@ -305,9 +313,9 @@ namespace MaridewFinance.App
                     }
                     if (cloudChanged)
                     {
-                        MergeCloudIntoDesktop(payload, cloudNewer: true);
                         lock (_gate)
                         {
+                            MergeCloudIntoDesktop(payload, cloudNewer: true);
                             _state.LastPullAt = Now();
                             _state.PendingReload = true;   // dashboard should re-read the DB
                         }
@@ -318,10 +326,28 @@ namespace MaridewFinance.App
                         {
                             _state.LastServerUpdatedAt = serverUpdatedAt;
                         }
+                        // Cloud deletions merge in above; adopt them into the
+                        // persistent log too so local rows cannot resurrect them.
+                        var pulled = TombstonesFromPayload(payload);
+                        if (pulled.Count > 0)
+                        {
+                            var tombs = TombstonesFromJson(_state.TombstonesJson);
+                            foreach (var grp in pulled)
+                            {
+                                foreach (var kv in grp.Value)
+                                {
+                                    RecordTombstone(tombs, grp.Key, kv.Key, kv.Value);
+                                }
+                            }
+                            _state.TombstonesJson = TombstonesToJson(tombs);
+                            SaveStateLocked();
+                        }
                     }
                 }
 
                 // Always finish with a push so the server converges to the union.
+                // (PushAsync persists the in-flight tombstone log on success, so
+                // deletions we pushed also guard this device from now on.)
                 await PushAsync();
 
                 lock (_gate)
@@ -399,6 +425,18 @@ namespace MaridewFinance.App
         {
             if (!IsEnabledForCurrentUser) return;
             StopTimers();
+
+            // Tombstones older than the retention window expire so a genuinely
+            // re-added id can live again (SQLite reuses ids; web uses Date.now).
+            lock (_gate)
+            {
+                var tombs = TombstonesFromJson(_state.TombstonesJson);
+                if (PruneTombstones(tombs, TombstoneRetentionDays) > 0)
+                {
+                    _state.TombstonesJson = TombstonesToJson(tombs);
+                    SaveStateLocked();
+                }
+            }
             _pullTimer = new System.Timers.Timer(PullIntervalMs) { AutoReset = true };
             _pullTimer.Elapsed += async (_, _) =>
             {
@@ -526,6 +564,30 @@ namespace MaridewFinance.App
                 ["settings"] = settings
             };
 
+            // Carry the deletion log inside the encrypted payload: rows removed
+            // here must stay deleted on every device (union merges honor it).
+            List<KeyValuePair<string, Dictionary<long, string>>> session;
+            lock (_sessionGate)
+            {
+                session = _sessionTombstones.ToList();
+                _sessionTombstones = new Dictionary<string, Dictionary<long, string>>();
+            }
+
+            lock (_gate)
+            {
+                var tombs = TombstonesFromJson(_state.TombstonesJson);
+                foreach (var grp in session)
+                {
+                    foreach (var kv in grp.Value)
+                    {
+                        RecordTombstone(tombs, grp.Key, kv.Key, kv.Value);
+                    }
+                }
+                PruneTombstones(tombs, TombstoneRetentionDays);
+                payload["tombstones"] = TombstonesToJson(tombs);
+                _tombstonesInFlight = payload["tombstones"]!.GetValue<string>();
+            }
+
             // Skip the upload when the local payload is byte-identical to what
             // we pushed last time — otherwise every sync round-trips a PUT and
             // the other device re-applies + re-pushes forever.
@@ -548,6 +610,7 @@ namespace MaridewFinance.App
                 {
                     _state.LastPushAt = Now();
                     _state.LastPushFingerprint = fingerprint;
+                    _state.TombstonesJson = _tombstonesInFlight;   // server now holds this deletion log
                     if (put["updatedAt"] is JsonValue uv && uv.TryGetValue<string>(out var upStr))
                     {
                         _state.LastServerUpdatedAt = upStr;
@@ -557,6 +620,20 @@ namespace MaridewFinance.App
             }
             else
             {
+                // Push failed: give the session deletions back so the next
+                // push still carries them (they were drained above).
+                lock (_sessionGate)
+                {
+                    var failed = TombstonesFromJson(_tombstonesInFlight);
+                    foreach (var grp in session)
+                    {
+                        foreach (var kv in grp.Value)
+                        {
+                            RecordTombstone(failed, grp.Key, kv.Key, kv.Value);
+                        }
+                    }
+                    _sessionTombstones = failed;
+                }
                 SetError(put?["error"]?.GetValue<string>() ?? "Cloud push failed.");
             }
         }
@@ -571,6 +648,9 @@ namespace MaridewFinance.App
         /// Merges a decrypted cloud payload into the desktop SQLite database,
         /// table by table, unioning rows by id. When <paramref name="cloudNewer"/>
         /// is true, cloud rows win conflicts; otherwise local rows win.
+        /// The deletion log guarding the merge is the UNION of this machine's
+        /// persistent tombstones and the payload's, so a stale device pushing
+        /// an old snapshot (no tombstones) still cannot resurrect deleted rows.
         /// Changed tables are written back through DbBridge.SaveTable.
         /// </summary>
         private void MergeCloudIntoDesktop(JsonObject cloudPayload, bool cloudNewer)
@@ -580,6 +660,19 @@ namespace MaridewFinance.App
 
             JsonObject? cloudTables = cloudPayload["tables"] as JsonObject;
             if (cloudTables == null) return;
+
+            Dictionary<string, Dictionary<long, string>> tombstones;
+            lock (_gate)
+            {
+                tombstones = TombstonesFromJson(_state.TombstonesJson);
+            }
+            foreach (var grp in TombstonesFromPayload(cloudPayload))
+            {
+                foreach (var kv in grp.Value)
+                {
+                    RecordTombstone(tombstones, grp.Key, kv.Key, kv.Value);
+                }
+            }
 
             var local = JsonNode.Parse(bridge.LoadAll()) as JsonObject;
             if (local == null) return;
@@ -592,16 +685,39 @@ namespace MaridewFinance.App
                 }
                 var localRows = local[table] as JsonArray ?? new JsonArray();
 
-                var merged = MergeRows(localRows, cloudRows, cloudNewer);
+                // Tombstoned ids are rows another device deleted; they must
+                // NOT ride back in via the union merge.
+                JsonArray effectiveCloudRows = cloudRows;
+                if (tombstones.TryGetValue(table, out var tableTombs) && tableTombs.Count > 0)
+                {
+                    effectiveCloudRows = new JsonArray();
+                    foreach (var row in cloudRows)
+                    {
+                        if (row == null) continue;
+                        var rid = IdOf(row);
+                        if (rid is long ridVal && tableTombs.ContainsKey(ridVal)) continue;
+                        effectiveCloudRows.Add(row.DeepClone());
+                    }
+                }
+
+                var merged = MergeRows(localRows, effectiveCloudRows, cloudNewer,
+                    tombstones.TryGetValue(table, out var deleted) ? deleted.Keys : null);
                 if (merged == null) continue;   // identical on both sides
 
-                bridge.SaveTable(table, merged.ToJsonString());
+                // fromSync: merge-driven writes must NOT be read as user
+                // re-adds (which clear tombstones) or new deletions.
+                bridge.SaveTable(table, merged.ToJsonString(), fromSync: true);
             }
         }
 
-        /// <summary>Union of both row sets by "id"; conflicts go to the newer side.</summary>
-        internal static JsonArray? MergeRows(JsonArray localRows, JsonArray cloudRows, bool cloudNewer)
+        /// <summary>
+        /// Union of both row sets by "id"; conflicts go to the newer side.
+        /// <paramref name="deletedIds"/> (from the tombstone log) filters out
+        /// cloud rows that a device deleted, so they never resurrect.
+        /// </summary>
+        internal static JsonArray? MergeRows(JsonArray localRows, JsonArray cloudRows, bool cloudNewer, IEnumerable<long>? deletedIds = null)
         {
+            var deletedSet = deletedIds != null ? new HashSet<long>(deletedIds) : null;
             var localById = new Dictionary<long, JsonNode?>();
             foreach (var row in localRows)
             {
@@ -621,6 +737,7 @@ namespace MaridewFinance.App
             {
                 if (row == null) continue;
                 var id = IdOf(row);
+                if (deletedSet != null && id is long delVal && deletedSet.Contains(delVal)) continue;   // tombstoned: stays deleted
                 if (id is long idVal && localById.TryGetValue(idVal, out var localRow) && localRow != null)
                 {
                     if (JsonNode.DeepEquals(localRow, row))
@@ -639,20 +756,178 @@ namespace MaridewFinance.App
                     changed = true;
                 }
             }
-            // Local-only rows appended.
+            // Local-only rows appended — except tombstoned ones: another
+            // device deleted them, so they go from here too (delete wins).
             foreach (var row in localRows)
             {
                 if (row == null) continue;
                 var id = IdOf(row);
-                if (id is long idVal && !cloudById.ContainsKey(idVal))
+                if (id is long idVal)
                 {
-                    result.Add(row.DeepClone());
-                    changed = true;
+                    if (deletedSet != null && deletedSet.Contains(idVal))
+                    {
+                        changed = true;
+                        continue;
+                    }
+                    if (!cloudById.ContainsKey(idVal))
+                    {
+                        result.Add(row.DeepClone());
+                        changed = true;
+                    }
                 }
             }
 
             if (!changed && result.Count == localRows.Count) return null;   // nothing to do
             return result;
+        }
+
+        // --------------------------------------------------------- tombstones
+
+        internal const int TombstoneRetentionDays = 30;
+
+        internal static Dictionary<string, Dictionary<long, string>> TombstonesFromJson(string? json)
+        {
+            var result = new Dictionary<string, Dictionary<long, string>>();
+            if (string.IsNullOrEmpty(json)) return result;
+            try
+            {
+                if (JsonNode.Parse(json) is not JsonObject root) return result;
+                foreach (var tableProp in root)
+                {
+                    if (tableProp.Value is not JsonObject ids) continue;
+                    var perTable = new Dictionary<long, string>();
+                    foreach (var idProp in ids)
+                    {
+                        if (long.TryParse(idProp.Key, out var tid) && idProp.Value is JsonValue tv)
+                        {
+                            perTable[tid] = tv.GetValue<string>();
+                        }
+                    }
+                    if (perTable.Count > 0) result[tableProp.Key] = perTable;
+                }
+            }
+            catch { /* corrupt log: start empty; worst case is a resurrection */ }
+            return result;
+        }
+
+        internal static string TombstonesToJson(Dictionary<string, Dictionary<long, string>> tombstones)
+        {
+            var root = new JsonObject();
+            foreach (var table in tombstones.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+            {
+                if (table.Value.Count == 0) continue;
+                var ids = new JsonObject();
+                foreach (var id in table.Value.OrderBy(kv => kv.Key))
+                {
+                    ids[id.Key.ToString()] = id.Value;
+                }
+                root[table.Key] = ids;
+            }
+            return root.ToJsonString();
+        }
+
+        /// <summary>Extracts {"table":{"id":deletedAt}} from a sync payload (absent = empty).</summary>
+        internal static Dictionary<string, Dictionary<long, string>> TombstonesFromPayload(JsonObject payload)
+        {
+            return payload.TryGetPropertyValue("tombstones", out var t) && t is JsonObject o
+                ? TombstonesFromJson(o.ToJsonString())
+                : new Dictionary<string, Dictionary<long, string>>();
+        }
+
+        internal static void RecordTombstone(Dictionary<string, Dictionary<long, string>> tombstones, string table, long id, string deletedAt)
+        {
+            if (!tombstones.TryGetValue(table, out var perTable))
+            {
+                perTable = new Dictionary<long, string>();
+                tombstones[table] = perTable;
+            }
+            if (!perTable.TryGetValue(id, out var existing) || string.CompareOrdinal(existing, deletedAt) < 0)
+            {
+                perTable[id] = deletedAt;
+            }
+        }
+
+        /// <summary>Drops tombstones older than the retention window (rows re-added after it win).</summary>
+        internal static int PruneTombstones(Dictionary<string, Dictionary<long, string>> tombstones, int maxAgeDays)
+        {
+            var cutoff = DateTime.UtcNow.AddDays(-maxAgeDays);
+            int removed = 0;
+            var staleTables = new List<string>();
+            foreach (var table in tombstones.Keys.ToList())
+            {
+                var perTable = tombstones[table];
+                foreach (var id in perTable.Keys.ToList())
+                {
+                    if (DateTime.TryParse(perTable[id], null, System.Globalization.DateTimeStyles.RoundtripKind, out var at) && at < cutoff)
+                    {
+                        perTable.Remove(id);
+                        removed++;
+                    }
+                }
+                if (perTable.Count == 0) staleTables.Add(table);
+            }
+            foreach (var t in staleTables) tombstones.Remove(t);
+            return removed;
+        }
+
+        /// <summary>
+        /// Called by DbBridge when a page-driven table replacement removed rows:
+        /// the ids become tombstones on the next push so deletions propagate.
+        /// </summary>
+        public void RecordDeletions(string table, IEnumerable<long> ids)
+        {
+            var at = Now();
+            lock (_sessionGate)
+            {
+                foreach (var id in ids)
+                {
+                    RecordTombstone(_sessionTombstones, table, id, at);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Called by DbBridge when a save re-introduces a previously deleted id:
+        /// the re-add is newer than the tombstone, so the deletion is undone
+        /// (both in the pending session log and the persisted one).
+        /// </summary>
+        public void ClearTombstones(string table, IEnumerable<long> ids)
+        {
+            var idSet = new HashSet<long>(ids);
+            if (idSet.Count == 0) return;
+            lock (_sessionGate)
+            {
+                if (_sessionTombstones.TryGetValue(table, out var sessionTable))
+                {
+                    foreach (var id in idSet) sessionTable.Remove(id);
+                    if (sessionTable.Count == 0) _sessionTombstones.Remove(table);
+                }
+            }
+            lock (_gate)
+            {
+                var tombs = TombstonesFromJson(_state.TombstonesJson);
+                if (tombs.TryGetValue(table, out var persisted))
+                {
+                    foreach (var id in idSet) persisted.Remove(id);
+                    if (persisted.Count == 0) tombs.Remove(table);
+                    _state.TombstonesJson = TombstonesToJson(tombs);
+                    SaveStateLocked();
+                }
+            }
+        }
+
+        /// <summary>True when a row id is currently tombstoned (deleted) for this table.</summary>
+        public bool IsTombstoned(string table, long id)
+        {
+            lock (_sessionGate)
+            {
+                if (_sessionTombstones.TryGetValue(table, out var s) && s.ContainsKey(id)) return true;
+            }
+            lock (_gate)
+            {
+                var tombs = TombstonesFromJson(_state.TombstonesJson);
+                return tombs.TryGetValue(table, out var t) && t.ContainsKey(id);
+            }
         }
 
         private static long? IdOf(JsonNode row)
