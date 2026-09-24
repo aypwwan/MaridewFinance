@@ -986,19 +986,22 @@
     function startCloudPoller(uid) {
         if (_pollerStarted) return;
         _pollerStarted = true;
+        var busy = false;
+        function done() { busy = false; }
         setInterval(function () {
-            if (document.hidden) return;                 // skip when tab not visible
+            if (busy || document.hidden) return;         // one tick at a time; skip when hidden
+            busy = true;
             getCloudToken(uid).then(function (token) {
                 if (!token) return;
                 cloudApi('/data', { headers: { Authorization: 'Bearer ' + token } }).then(function (res) {
                     if (!res.ok || !res.blob) return;
                     var fp = JSON.stringify(res.blob);   // cheap pre-decrypt change check
                     if (fp === _lastBlobStr) return;
-                    _lastBlobStr = fp;
                     return getCloudEncKey(uid).then(function (encKey) {
                         if (!encKey) return;
                         return decryptPayload(encKey, res.blob).then(function (payload) {
                             return applyCloudPayload(uid, payload).then(function (changed) {
+                                _lastBlobStr = fp;       // fingerprint only after a clean apply
                                 if (changed) {
                                     window.location.reload();            // re-render from merged cache
                                 }
@@ -1006,7 +1009,8 @@
                         });
                     });
                 });
-            })['catch'](function () { /* offline: try again next tick */ });
+            })['catch'](function () { /* offline or failed apply: retry next tick */ })
+               ['then'](done, done);                    // always free the next tick
         }, 20000);
     }
 })();
