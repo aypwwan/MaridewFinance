@@ -24,7 +24,7 @@
 
     <ApplicationId>com.maridew.finance</ApplicationId>
     <ApplicationTitle>Maridew Finance</ApplicationTitle>
-    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationVersion>10004</ApplicationVersion>
     <ApplicationVersionName>1.0.4</ApplicationVersionName>
 
     <!-- Keep code running under the app package for privacy, use a real app
