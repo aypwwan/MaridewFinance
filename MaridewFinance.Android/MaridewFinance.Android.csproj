@@ -24,8 +24,8 @@
 
     <ApplicationId>com.maridew.finance</ApplicationId>
     <ApplicationTitle>Maridew Finance</ApplicationTitle>
-    <ApplicationVersion>10004</ApplicationVersion>
-    <ApplicationVersionName>1.0.4</ApplicationVersionName>
+    <ApplicationVersion>10005</ApplicationVersion>
+    <ApplicationVersionName>1.0.5</ApplicationVersionName>
 
     <!-- Keep code running under the app package for privacy, use a real app
          name for the WebView user agent and asset-loader domain. -->
