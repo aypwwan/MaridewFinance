@@ -945,6 +945,57 @@
     };
 
     // ------------------------------------------------------------- install
+    // ------------------------------------------------------ headless sync mode
+    // The Android app loads this page in a hidden WebView (SyncService) on a
+    // native timer so entries arrive while the app itself is closed. With
+    // ?headless=1 there is no visible dashboard to reload: no auth gate, no
+    // poller/re-render loop - just an exported window.__maridewSync the host
+    // evaluates on each native tick.
+    if (/[?&]headless=1/.test(location.search) || /\/sync\.html$/.test(location.pathname)) {
+        window.__maridewSync = {
+            pull: function () {
+                return sessionReady().then(function (uid) {
+                    if (!uid) return JSON.stringify({ ok: false, reason: 'no-session' });
+                    return getCloudToken(uid).then(function (token) {
+                        if (!token) return JSON.stringify({ ok: false, reason: 'no-token' });
+                        return cloudApi('/data', { headers: { Authorization: 'Bearer ' + token } }).then(function (res) {
+                            if (!res.ok || !res.blob) return JSON.stringify({ ok: false, reason: 'http', updatedAt: res.updatedAt || null });
+                            return getCloudEncKey(uid).then(function (encKey) {
+                                if (!encKey) return JSON.stringify({ ok: false, reason: 'no-key' });
+                                var before = {};
+                                return Promise.all(TABLES.map(function (tb) {
+                                    return dbGet(STORE_DATA, dataKey(uid, tb)).then(function (row) {
+                                        before[tb] = ((row && row.rows) || []).length;
+                                    });
+                                })).then(function () {
+                                    return decryptPayload(encKey, res.blob).then(function (payload) {
+                                        return applyCloudPayload(uid, payload).then(function (changed) {
+                                            if (!changed) return JSON.stringify({ ok: true, changed: false, updatedAt: res.updatedAt || null });
+                                            return Promise.all(TABLES.map(function (tb) {
+                                                return dbGet(STORE_DATA, dataKey(uid, tb)).then(function (row) {
+                                                    return { tb: tb, delta: (((row && row.rows) || []).length) - before[tb] };
+                                                });
+                                            })).then(function (deltas) {
+                                                var added = [];
+                                                var removed = 0;
+                                                deltas.forEach(function (d) {
+                                                    if (d.delta > 0) added.push(d.delta + ' ' + d.tb);
+                                                    if (d.delta < 0) removed += -d.delta;
+                                                });
+                                                return JSON.stringify({ ok: true, changed: true, added: added, removed: removed, updatedAt: res.updatedAt || null });
+                                            });
+                                        });
+                                    });
+                                });
+                            });
+                        });
+                    });
+                })['catch'](function (e) { return JSON.stringify({ ok: false, reason: 'error', error: (e && e.message) || String(e) }); });
+            }
+        };
+        return;
+    }
+
     window.maridewDbBridge = dbBridge;
     window.maridewUpdateBridge = updateBridge;
     // Bridge the WebView2 namespace lookup so the page's existing

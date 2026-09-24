@@ -26,6 +26,12 @@ APK and served from a private `https://` origin (AndroidX WebViewAssetLoader),
 with storage in the WebView's IndexedDB on the device. Every release is signed
 with the same stable key, so updates install in place without losing data.
 
+**Background sync:** a quiet foreground service keeps the app synced even when
+it is closed — entries added on another device arrive automatically (about
+every 5 minutes) and raise a "New entries" notification. It restarts after
+reboot and shows a persistent low-priority notification while active; you can
+stop it any time from Android's *Settings → Apps → Maridew Finance → Stop*.
+
 ## Download & install (end users)
 
 No build tools needed:

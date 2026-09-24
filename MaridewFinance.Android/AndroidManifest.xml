@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-          package="com.maridew.finance"
-          android:versionCode="1"
-          android:versionName="1.0.4">
-
-  <uses-sdk android:minSdkVersion="24" />
+          package="com.maridew.finance">
 
   <!-- INTERNET is required for the cloud-sync worker (maridew-sync.maridew.workers.dev). -->
   <uses-permission android:name="android.permission.INTERNET" />
+  <!-- Background sync: foreground service so pulls continue while the app is closed. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+  <!-- Needed on 13+ to show the "new entries arrived" notifications. -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
   <application
       android:label="@string/app_name"
@@ -16,6 +18,23 @@
       android:allowBackup="true"
       android:supportsRtl="true"
       android:theme="@style/MaridewTheme">
+
+    <service
+        android:name="com.maridew.finance.SyncService"
+        android:exported="false"
+        android:foregroundServiceType="specialUse">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps encrypted financial sync running so entries arrive while the app is closed." />
+    </service>
+
+    <receiver android:name="com.maridew.finance.BootReceiver"
+              android:enabled="true"
+              android:exported="true"
+              android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+      </intent-filter>
+    </receiver>
   </application>
 
 </manifest>

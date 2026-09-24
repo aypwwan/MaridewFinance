@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<!--
+  Headless sync controller for the Android SyncService.
+
+  The service hosts this page in a hidden WebView and evaluates
+  __maridewSync.pull() on a native timer. The bridge runs in headless mode
+  (?headless=1): no auth gate, no dashboard, no poller - just the same
+  IndexedDB storage, cloud token and AES key as the visible app, so a pull
+  here is exactly a pull in the app. The JSON summary it returns lets the
+  service raise a notification when new entries arrived.
+-->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Maridew Sync</title>
+  <script src="web-bridge.js"></script>
+</head>
+<body>
+  <p>Maridew Finance background sync is active.</p>
+</body>
+</html>

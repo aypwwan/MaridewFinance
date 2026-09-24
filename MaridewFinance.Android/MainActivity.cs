@@ -1,6 +1,7 @@
 using Android.App;
 using Android.Content;
 using Android.Content.PM;
+using Android.Runtime;
 using Android.OS;
 using Android.Views;
 using Android.Webkit;
@@ -22,8 +23,10 @@ namespace MaridewFinance.AndroidApp
         Icon = "@mipmap/ic_launcher",
         Theme = "@style/MaridewTheme",
         MainLauncher = true,
+        Name = "com.maridew.finance.MainActivity",
         ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.KeyboardHidden,
         WindowSoftInputMode = SoftInput.AdjustResize)]
+    [Register("com.maridew.finance.MainActivity")]
     public class MainActivity : AppCompatActivity
     {
         protected override void OnCreate(Bundle? savedInstanceState)
@@ -56,6 +59,11 @@ namespace MaridewFinance.AndroidApp
 
             webView.SetWebViewClient(new MaridewWebViewClient(this, assetLoader));
             webView.SetWebChromeClient(new WebChromeClient());
+
+            // Keep sync alive while the app is closed (idempotent: the system
+            // delivers to the existing running service).
+            try { StartForegroundService(new Intent(this, typeof(SyncService))); }
+            catch { /* e.g. foreground-service restrictions; the app still syncs while open */ }
             // Assets are embedded under Assets/wwwroot (see the csproj Link), so
             // the /assets/ handler maps /assets/wwwroot/* onto them.
             webView.LoadUrl("https://appassets.androidplatform.net/assets/wwwroot/index.html");
