@@ -35,6 +35,11 @@ namespace MaridewFinance.AndroidApp
             var assetLoader = assetLoaderBuilder.Build()!;
 
             var webView = new WebView(this);
+#if DEBUG
+            // Lets automated tests drive the page via Chrome DevTools over adb
+            // (chrome_devtools_remote). Stripped from release builds.
+            WebView.SetWebContentsDebuggingEnabled(true);
+#endif
             var settings = webView.Settings!;
             settings.JavaScriptEnabled = true;
             settings.DomStorageEnabled = true;          // IndexedDB + localStorage (web-bridge storage)
@@ -51,7 +56,9 @@ namespace MaridewFinance.AndroidApp
 
             webView.SetWebViewClient(new MaridewWebViewClient(this, assetLoader));
             webView.SetWebChromeClient(new WebChromeClient());
-            webView.LoadUrl("https://appassets.androidplatform.net/assets/index.html");
+            // Assets are embedded under Assets/wwwroot (see the csproj Link), so
+            // the /assets/ handler maps /assets/wwwroot/* onto them.
+            webView.LoadUrl("https://appassets.androidplatform.net/assets/wwwroot/index.html");
 
             SetContentView(webView);
         }
