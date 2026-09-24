@@ -1,0 +1,63 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Maridew Finance for Android
+
+    A lightweight native wrapper that ships the SAME dashboard the desktop app
+    uses (MaridewFinance.App/wwwroot) inside the system WebView, served from the
+    APK assets via androidx.webkit WebViewAssetLoader so the page runs on a real
+    https:// origin (required for IndexedDB and WebCrypto - the web edition's
+    cloud-sync crypto needs both).
+
+    The web bridge (web-bridge.js) activates automatically: it only stands down
+    inside WebView2 where the real C# bridges exist, and Android WebView exposes
+    no hostObjects. All storage stays on-device in IndexedDB; cloud sync works
+    exactly as in the browser edition.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-android36.0</TargetFramework>
+    <SupportedOSPlatformVersion>24.0</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <ApplicationId>com.maridew.finance</ApplicationId>
+    <ApplicationTitle>Maridew Finance</ApplicationTitle>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationVersionName>1.0.4</ApplicationVersionName>
+
+    <!-- Keep code running under the app package for privacy, use a real app
+         name for the WebView user agent and asset-loader domain. -->
+    <ApplicationLabel>Maridew Finance</ApplicationLabel>
+    <AndroidPackageFormat>apk</AndroidPackageFormat>
+    <!-- Single universal ABI keeps the artifact one installable file. -->
+    <RuntimeIdentifiers>android-arm64</RuntimeIdentifiers>
+    <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
+    <AndroidCreatePackagePerAbi>false</AndroidCreatePackagePerAbi>
+
+    <AndroidResgenFile>Resources\Resource.designer.cs</AndroidResgenFile>
+    <AndroidResgenClass>Resource</AndroidResgenClass>
+
+    <!-- Stable release signing (repo-local keystore, used from CI too so
+         installs stay updatable in place). AndroidKeyStore enables it. -->
+    <AndroidKeyStore>true</AndroidKeyStore>
+    <AndroidSigningKeyStore>maridew.keystore</AndroidSigningKeyStore>
+    <AndroidSigningKeyAlias>maridew</AndroidSigningKeyAlias>
+    <AndroidSigningKeyPass>maridew</AndroidSigningKeyPass>
+    <AndroidSigningStorePass>maridew</AndroidSigningStorePass>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Xamarin.AndroidX.AppCompat" Version="1.8.0" />
+    <PackageReference Include="Xamarin.AndroidX.WebKit" Version="1.17.0" />
+  </ItemGroup>
+
+  <!-- Ship the shared dashboard inside the APK assets. -->
+  <ItemGroup>
+    <AndroidAsset Include="..\MaridewFinance.App\wwwroot\**\*">
+      <Link>Assets\wwwroot\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </AndroidAsset>
+  </ItemGroup>
+
+</Project>

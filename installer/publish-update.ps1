@@ -25,6 +25,7 @@ param(
     [Parameter(Mandatory = $true)] [string]$Repo,        # owner/name
     [Parameter(Mandatory = $true)] [string]$Version,     # e.g. 1.0.1
     [string]$SetupExe = "",                              # defaults to dist\MaridewFinanceSetup-<Version>.exe
+    [string]$ApkPath = "",                               # optional Android APK to attach to the same release
     [string]$Notes = "",
     [string]$Token = $env:GITHUB_TOKEN,
     [switch]$DryRun
@@ -103,6 +104,15 @@ try {
 # spell it with .exe - bare `curl` in PowerShell aliases Invoke-WebRequest.
 $assets = @(@{ Path = $SetupExe; Name = (Split-Path -Leaf $SetupExe) },
             @{ Path = $null;    Name = "latest.json"; Content = $json })
+
+if ($ApkPath -ne "") {
+    if (-not (Test-Path $ApkPath)) {
+        throw "ApkPath given but file not found: $ApkPath"
+    }
+    $apkName = "MaridewFinance-$Version.apk"
+    $assets += @{ Path = $ApkPath; Name = $apkName }
+    Write-Host "APK       : $ApkPath (uploaded as $apkName)"
+}
 
 $uploadBase = ($release.upload_url -split '\{')[0]   # strip the {?name,label} URI template
 

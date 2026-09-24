@@ -1,13 +1,23 @@
-# Release pipeline: builds the installer and publishes it to GitHub Releases.
+# Release pipeline: builds the Windows installer and the Android APK, then
+# publishes both to the same GitHub Release.
 #
 # Triggered by pushing a version tag (git push origin v1.0.1). The workflow
-# refuses to run unless the tag matches BOTH <Version> in MaridewFinance.App.csproj
-# and UpdateService.CurrentVersion - so the published feed always agrees with
-# what installed copies of the app report about themselves.
+# refuses to run unless the tag matches:
+#   - <Version> in MaridewFinance.App.csproj
+#   - UpdateService.CurrentVersion
+#   - WEB_VERSION in wwwroot/web-bridge.js
+#   - ApplicationVersionName in MaridewFinance.Android.csproj
+# ...so every artifact and feed reports the same version.
 #
-# Optional code signing: add repo secrets MARIDEW_SIGN_PFX_B64 (base64 of a
-# .pfx) and MARIDEW_SIGN_PASSWORD. Without them the installer is built unsigned
-# (same as a local build without a certificate).
+# Android versionCode is derived from the tag: major*10000 + minor*100 + patch
+# (1.0.4 -> 10004), keeping release order monotonic for Play-safe installs.
+#
+# The APK is signed with the repo-local stable keystore (MaridewFinance.Android/
+# maridew.keystore) so every build - local and CI - updates installs in place.
+#
+# Optional Windows code signing: add repo secrets MARIDEW_SIGN_PFX_B64 (base64
+# of a .pfx) and MARIDEW_SIGN_PASSWORD. Without them the installer is built
+# unsigned (same as a local build without a certificate).
 #
 # See installer/AUTO-UPDATE.md for the full release process.
 
@@ -20,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g. 1.0.1). Must match the csproj and UpdateService.CurrentVersion.'
+        description: 'Version to release (e.g. 1.0.1). Must match every project version marker.'
         required: true
         type: string
 
@@ -28,7 +38,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  windows-installer:
     runs-on: windows-latest
     timeout-minutes: 30
     defaults:
@@ -52,12 +62,16 @@ jobs:
             exit 1
           }
           $version = $tag.Substring(1)
+          $parts = $version.Split('.')
+          $code = [int]$parts[0] * 10000 + [int]$parts[1] * 100 + [int]$parts[2]
           "version=$version" >> $env:GITHUB_OUTPUT
-          Write-Host "Releasing version $version"
+          "code=$code" >> $env:GITHUB_OUTPUT
+          Write-Host "Releasing version $version (Android versionCode $code)"
 
       - name: Verify source versions match the tag
         run: |
           $version = '${{ steps.ver.outputs.version }}'
+          $code = '${{ steps.ver.outputs.code }}'
 
           $csproj = Get-Content 'MaridewFinance.App/MaridewFinance.App.csproj' -Raw
           if ($csproj -notmatch [regex]::Escape("<Version>$version</Version>")) {
@@ -77,7 +91,17 @@ jobs:
             exit 1
           }
 
-          Write-Host "Version $version verified in csproj, UpdateService, and web-bridge."
+          $androidProj = Get-Content 'MaridewFinance.Android/MaridewFinance.Android.csproj' -Raw
+          if ($androidProj -notmatch [regex]::Escape("<ApplicationVersionName>$version</ApplicationVersionName>")) {
+            Write-Error "Android ApplicationVersionName does not match $version. Bump it first."
+            exit 1
+          }
+          if ($androidProj -notmatch [regex]::Escape("<ApplicationVersion>$code</ApplicationVersion>")) {
+            Write-Error "Android ApplicationVersion should be $code for version $version (major*10000 + minor*100 + patch)."
+            exit 1
+          }
+
+          Write-Host "Version $version verified in csproj, UpdateService, web-bridge, and the Android project."
 
       - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
@@ -119,7 +143,7 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File 'installer/build.ps1' -Version $version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload build artifact (for inspection)
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: installer
@@ -128,13 +152,122 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  android-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag (or dispatch input)
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="v${{ inputs.version }}"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag '$TAG' must look like v1.2.3" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "Releasing $VERSION (Android versionCode $CODE)"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup .NET 10 SDK (Android workload band)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install .NET Android workload
+        run: dotnet workload install android --verbosity minimal
+
+      - name: Ensure Android SDK platform 36
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+
+      - name: Build signed APK
+        run: |
+          dotnet publish MaridewFinance.Android/MaridewFinance.Android.csproj -c Release \
+            -p:ApplicationVersionName='${{ steps.ver.outputs.version }}' \
+            -p:ApplicationVersion='${{ steps.ver.outputs.code }}' \
+            -o android-dist
+          mv android-dist/com.maridew.finance-Signed.apk \
+             "android-dist/MaridewFinance-${{ steps.ver.outputs.version }}.apk"
+
+      - name: Verify APK signature
+        run: |
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs \
+            "android-dist/MaridewFinance-${{ steps.ver.outputs.version }}.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: android-dist/MaridewFinance-*.apk
+          retention-days: 14
+          if-no-files-found: error
+
+  publish-release:
+    needs: [windows-installer, android-apk]
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag (or dispatch input)
+        id: ver
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $tag = 'v' + '${{ inputs.version }}'
+          } else {
+            $tag = $env:GITHUB_REF_NAME
+          }
+          $version = $tag.Substring(1)
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Publishing release $version"
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: installer
+          path: dist
+
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: apk
+
       - name: Publish release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $version = '${{ steps.ver.outputs.version }}'
           powershell -NoProfile -ExecutionPolicy Bypass -File 'installer/publish-update.ps1' `
-            -Repo '${{ github.repository }}' -Version $version -Notes "Release $version."
+            -Repo '${{ github.repository }}' -Version $version `
+            -SetupExe "dist/MaridewFinanceSetup-$version.exe" `
+            -ApkPath "apk/MaridewFinance-$version.apk" `
+            -Notes "Release $version."
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Summary
@@ -145,4 +278,5 @@ jobs:
           ""                                                  >> $env:GITHUB_STEP_SUMMARY
           "Feed: https://github.com/$repo/releases/latest/download/latest.json" >> $env:GITHUB_STEP_SUMMARY
           "Installer: https://github.com/$repo/releases/download/v$version/MaridewFinanceSetup-$version.exe" >> $env:GITHUB_STEP_SUMMARY
+          "Android: https://github.com/$repo/releases/download/v$version/MaridewFinance-$version.apk" >> $env:GITHUB_STEP_SUMMARY
           "Installed copies see the update on their next check." >> $env:GITHUB_STEP_SUMMARY

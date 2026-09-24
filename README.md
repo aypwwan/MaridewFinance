@@ -1,8 +1,9 @@
-# Maridew Finance — Desktop App
+# Maridew Finance
 
-A Windows desktop wealth-management dashboard, converted from the original web
-mockup to a native Visual Studio project. All monetary values now display in
-**Kenyan Shillings (KSh / KES)** instead of US dollars.
+A wealth-management dashboard available on **Windows (desktop app)**, in the
+**browser (web edition)**, and on **Android (APK)** — all three share the same
+dashboard UI and the same zero-knowledge cloud sync. All monetary values
+display in **Kenyan Shillings (KSh / KES)**.
 
 ## Use it in your browser (no install)
 
@@ -10,6 +11,20 @@ mockup to a native Visual Studio project. All monetary values now display in
 running entirely client-side. Create an account and it works from any device: data is encrypted
 in your browser (AES-GCM, PBKDF2-derived key) before it's synced, so the server stores only
 ciphertext it cannot read. Use **Settings → Export** for a portable JSON backup.
+
+## Install on Android (APK)
+
+1. Download `MaridewFinance-<version>.apk` from
+   **[Releases](https://github.com/aypwwan/MaridewFinance/releases/latest)**.
+2. Open it on your phone (Android 7.0+); allow *Install unknown apps* for your
+   browser/file manager when prompted (normal for apps outside the Play Store).
+3. That's it — the full dashboard runs on-device with the same accounts and
+   encrypted cloud sync as the web edition, so your data appears on both.
+
+The app is a thin native wrapper: the shared dashboard is bundled inside the
+APK and served from a private `https://` origin (AndroidX WebViewAssetLoader),
+with storage in the WebView's IndexedDB on the device. Every release is signed
+with the same stable key, so updates install in place without losing data.
 
 ## Download & install (end users)
 
@@ -77,6 +92,12 @@ MaridewFinance/
 │   │   ├── generate-selfsigned-cert.ps1  # Local CA + signing cert (internal use)
 │   │   └── trust-ca.ps1                   # Trust the local CA on a PC
 │   └── dist/                        # Output: MaridewFinanceSetup-<version>.exe
+├── MaridewFinance.Android/          # Android APK wrapper around the same wwwroot
+│   ├── MaridewFinance.Android.csproj
+│   ├── MainActivity.cs              # WebView + WebViewAssetLoader host
+│   ├── AndroidManifest.xml
+│   ├── maridew.keystore             # stable signing key (also used by CI)
+│   └── Resources/                   # launcher icons + theme
 └── MaridewFinance.App/
     ├── MaridewFinance.App.csproj     # WPF project, .NET 8, WebView2 reference
     ├── app.manifest                  # High-DPI / asInvoker manifest
