@@ -24,7 +24,7 @@
 
     <ApplicationId>com.maridew.finance</ApplicationId>
     <ApplicationTitle>Maridew Finance</ApplicationTitle>
-    <ApplicationVersion>10005</ApplicationVersion>
+    <ApplicationVersion>10006</ApplicationVersion>
     <ApplicationVersionName>1.0.6</ApplicationVersionName>
 
     <!-- Android 8.0+. The system WebView is a component that updates via Play,
