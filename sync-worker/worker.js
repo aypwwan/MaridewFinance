@@ -242,12 +242,20 @@ async function authName(env, request) {
   const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
   if (!env.TOKEN_SECRET || !token) return null;
   const parts = token.split('.');
-  if (parts.length !== 4) return null;   // name.tv.exp.sig
-  const [name, tvStr, expStr, sigHex] = parts;
+  // Two accepted layouts: v4 "name.tv.exp.sig" and the pre-v4 "name.exp.sig"
+  // (old clients must keep working; their tokens are treated as tv=1 and are
+  // revoked the same way once the account's tv moves past 1).
+  if (parts.length !== 4 && parts.length !== 3) return null;
+  const legacy = parts.length === 3;
+  const name = parts[0];
+  const tvStr = legacy ? '1' : parts[1];
+  const expStr = legacy ? parts[1] : parts[2];
+  const sigHex = legacy ? parts[2] : parts[3];
   const exp = parseInt(expStr, 10);
   const tv = parseInt(tvStr, 10);
   if (!name || !tv || !exp || exp < Math.floor(Date.now() / 1000)) return null;
-  const sig = await crypto.subtle.sign('HMAC', await hmacKey(env), new TextEncoder().encode(name + '.' + tvStr + '.' + expStr));
+  const payload = legacy ? name + '.' + expStr : name + '.' + tvStr + '.' + expStr;
+  const sig = await crypto.subtle.sign('HMAC', await hmacKey(env), new TextEncoder().encode(payload));
   const expect = [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('');
   if (sigHex.length !== expect.length) return null;
   let diff = 0;
