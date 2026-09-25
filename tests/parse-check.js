@@ -17,7 +17,12 @@ const pages = ['index.html', 'sync.html'];
 let errors = 0;
 function check(name, code) {
     try {
-        new Function(code);   // throws on syntax errors (any ES version V8 accepts)
+        // `new Function` parses classic scripts only, so ES module syntax
+        // (the sync worker's `export default`) is converted to a plain
+        // declaration first. Everything else must parse exactly as shipped.
+        const asScript = code.replace(/^\s*export\s+default\s+/m, 'const __export_default = ')
+                             .replace(/^\s*export\s+\{[^}]*\}\s*;?\s*$/gm, '');
+        new Function(asScript);   // throws on syntax errors (any ES version V8 accepts)
         console.log('ok   ' + name);
     } catch (e) {
         errors++;
