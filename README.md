@@ -27,10 +27,14 @@ with storage in the WebView's IndexedDB on the device. Every release is signed
 with the same stable key, so updates install in place without losing data.
 
 **Background sync:** a quiet foreground service keeps the app synced even when
-it is closed — entries added on another device arrive automatically (about
-every 5 minutes) and raise a "New entries" notification. It restarts after
-reboot and shows a persistent low-priority notification while active; you can
-stop it any time from Android's *Settings → Apps → Maridew Finance → Stop*.
+it is closed — in both directions: entries added on another device arrive
+automatically (about every 5 minutes) and raise a "New entries" notification,
+while anything added on the phone while it was closed is pushed to the cloud on
+the same timer. Idle ticks don't touch the cloud (the push is skipped unless
+local data actually differs from the server's copy), so other devices aren't
+spammed with updates. Successful uploads just refresh the "last synced" time in
+the persistent notification; it restarts after reboot. You can stop the service
+any time from Android's *Settings → Apps → Maridew Finance → Stop*.
 
 ## Download & install (end users)
 

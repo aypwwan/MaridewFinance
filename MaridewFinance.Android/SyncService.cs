@@ -15,9 +15,12 @@ namespace MaridewFinance.AndroidApp
     /// Keeps sync alive while the app is closed: a foreground service that
     /// hosts a hidden WebView running the SAME page storage as the visible
     /// app (same IndexedDB origin) and calls the bridge's headless
-    /// __maridewSync.pull() on a native timer. Pulls run every 5 minutes on
-    /// any network; a notification is raised when new entries actually
-    /// arrive, so entries appear without opening the app.
+    /// __maridewSync.sync() on a native timer. Each tick pulls the cloud,
+    /// merges it, and pushes local tables back ONLY when they differ from
+    /// the cloud, so entries flow both ways while the app is closed without
+    /// churning the cloud's updatedAt on idle devices. New incoming entries
+    /// raise a notification; successful pushes just refresh the quiet
+    /// foreground-service notification with the last sync time.
     /// </summary>
     [Service(Name = "com.maridew.finance.SyncService", Exported = false, ForegroundServiceType = ForegroundService.TypeSpecialUse)]
     [Register("com.maridew.finance.SyncService")]
@@ -33,8 +36,8 @@ namespace MaridewFinance.AndroidApp
         private bool _pageReady;
 
         // The interface object is injected as "MaridewSyncBridge"; the page calls
-        // MaridewSyncBridge.deliverResult(json) with each pull result.
-        private const string PullJs = "(window.__maridewSync && window.__maridewSync.pull ? window.__maridewSync.pull() : Promise.resolve(JSON.stringify({ok:false,reason:'no-bridge'})))" +
+        // MaridewSyncBridge.deliverResult(json) with each sync result.
+        private const string SyncJs = "(window.__maridewSync && window.__maridewSync.sync ? window.__maridewSync.sync() : Promise.resolve(JSON.stringify({ok:false,reason:'no-bridge'})))" +
             ".then(function(s){ MaridewSyncBridge.deliverResult(s); })" +
             ".catch(function(e){ MaridewSyncBridge.deliverResult(JSON.stringify({ok:false,reason:'error',error:String(e && e.message || e)})); })";
 
@@ -94,19 +97,30 @@ namespace MaridewFinance.AndroidApp
             _handler!.PostDelayed(new Runnable(() =>
             {
                 if (_webView is null) return;
-                if (_pageReady) _webView.EvaluateJavascript(PullJs, null);
+                if (_pageReady) _webView.EvaluateJavascript(SyncJs, null);
                 ScheduleNextTick(PullIntervalMs);
             }), 4000);
         }
 
-        private void OnPullResult(string? json)
+        private void OnSyncResult(string? json)
         {
-            global::Android.Util.Log.Info("maridew", "pull result: " + (json ?? "<null>"));
+            global::Android.Util.Log.Info("maridew", "sync result: " + (json ?? "<null>"));
             try
             {
                 if (string.IsNullOrEmpty(json)) return;
                 var j = new Org.Json.JSONObject(json);
-                if (!j.OptBoolean("ok", false) || !j.OptBoolean("changed", false)) return;
+                if (!j.OptBoolean("ok", false)) return;   // no-session/no-token/network: quietly retry next tick
+
+                // Pushed local changes: refresh the quiet foreground-service
+                // notification ("Last synced HH:mm") - no user-facing alert,
+                // uploads are the device's own edits.
+                if (j.OptBoolean("pushed", false))
+                {
+                    UpdateForegroundText("Background sync active - last synced " + DateTime.Now.ToString("HH:mm") + ".");
+                }
+
+                // Pulled remote changes: raise a user notification.
+                if (!j.OptBoolean("changed", false)) return;
                 var added = j.OptJSONArray("added");
                 var parts = new List<string>();
                 if (added is not null)
@@ -122,7 +136,7 @@ namespace MaridewFinance.AndroidApp
             catch (System.Exception ex)
             {
                 // Never let notification formatting kill the service.
-                global::Android.Util.Log.Error("maridew", "pull handling failed: " + ex);
+                global::Android.Util.Log.Error("maridew", "sync handling failed: " + ex);
             }
         }
 
@@ -147,7 +161,13 @@ namespace MaridewFinance.AndroidApp
             ((NotificationManager)GetSystemService(NotificationService)!).Notify(2002, builder.Build());
         }
 
-        private void StartForegroundWithText(string text)
+        private void StartForegroundWithText(string text) => PostForeground(text);
+
+        // (Re)posts the ongoing foreground-service notification; calling this
+        // again with the same id simply updates its text.
+        private void UpdateForegroundText(string text) => PostForeground(text);
+
+        private void PostForeground(string text)
         {
             Notification.Builder builder;
             if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
@@ -164,7 +184,8 @@ namespace MaridewFinance.AndroidApp
             builder.SetSmallIcon(global::MaridewFinance.Android.Resource.Mipmap.ic_launcher)
                 .SetContentTitle("Maridew Finance")
                 .SetContentText(text)
-                .SetOngoing(true);
+                .SetOngoing(true)
+                .SetOnlyAlertOnce(true);
             if (Build.VERSION.SdkInt >= BuildVersionCodes.UpsideDownCake)
             {
                 StartForeground(NotifyId, builder.Build(), ForegroundService.TypeSpecialUse);
@@ -175,7 +196,7 @@ namespace MaridewFinance.AndroidApp
             }
         }
 
-        /// <summary>JS bridge: the pull promise delivers its JSON here.</summary>
+        /// <summary>JS bridge: the sync promise delivers its JSON here.</summary>
         private class Deliver : Java.Lang.Object
         {
             private readonly SyncService _owner;
@@ -188,7 +209,7 @@ namespace MaridewFinance.AndroidApp
                 global::Android.Util.Log.Info("maridew", "deliver called, len=" + (json?.Length ?? 0));
                 if (json is null) return;
                 var text = json;
-                _owner._handler!.Post(() => _owner.OnPullResult(text));
+                _owner._handler!.Post(() => _owner.OnSyncResult(text));
             }
         }
 

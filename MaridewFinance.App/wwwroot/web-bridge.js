@@ -359,9 +359,13 @@
     function scheduleCloudPush() {
         if (!SYNC_SERVER) return;
         if (_pushTimer) clearTimeout(_pushTimer);
-        _pushTimer = setTimeout(pushAllToCloud, 2500);
+        _pushTimer = setTimeout(syncAllToCloud, 2500);
     }
-    function pushAllToCloud() {
+    // One full cloud round trip for the signed-in user: pull-merge first, then
+    // push local tables + settings + tombstones. Only runs when triggered by a
+    // save or an explicit sync - use headlessSync() for the timer-driven
+    // background path (it skips the upload when nothing changed).
+    function syncAllToCloud() {
         if (!SYNC_SERVER || !_currentUserId) return Promise.resolve();
         var uid = _currentUserId;
         return getCloudToken(uid).then(function (token) {
@@ -400,6 +404,50 @@
                 });
             });
         })['catch'](function () { /* offline; retried on next save */ });
+    }
+    // Same round trip as syncAllToCloud, but returns a JSON-able summary and
+    // pushes ONLY when the local tables differ from the cloud payload just
+    // pulled - so a timer (Android background service) can call it every few
+    // minutes without bumping updatedAt for every other device while idle.
+    // No SYNC_SERVER/_currentUserId guard: callers resolve the uid themselves.
+    function headlessSync(uid, opts) {
+        var doPull = !(opts && opts.pull === false);
+        return getCloudToken(uid).then(function (token) {
+            if (!token) return { ok: false, reason: 'no-token' };
+            return getCloudEncKey(uid).then(function (encKey) {
+                if (!encKey) return { ok: false, reason: 'no-key' };
+                return cloudApi('/data', { headers: { Authorization: 'Bearer ' + token } }).then(function (res) {
+                    if (!res.ok) return { ok: false, reason: 'http' };
+                    var cloudPayload = null;
+                    var pullStep = (res.blob && doPull
+                        ? decryptPayload(encKey, res.blob).then(function (p) { cloudPayload = p; return applyCloudPayload(uid, p); })
+                        : Promise.resolve(false));
+                    return pullStep.then(function (pulledChanged) {
+                        return dbBridge.LoadAll().then(function (allJson) {
+                            // After the merge, local == union(local, cloud); equal
+                            // fingerprints mean the cloud already holds exactly
+                            // what we have, so there is nothing to upload.
+                            var localFp = allJson;
+                            if (cloudPayload && localFp === JSON.stringify(cloudPayload.tables)) {
+                                return { ok: true, pushed: false, changed: !!pulledChanged, updatedAt: res.updatedAt || null };
+                            }
+                            return dbGet(STORE_KV, settingsKey(uid)).then(function (row) {
+                                return getTombstones(uid).then(function (tombs) {
+                                    var payload = { tables: JSON.parse(allJson), settings: (row && row.v) || {}, tombstones: pruneTombstones(tombs, TOMBSTONE_RETENTION_DAYS) };
+                                    return encryptPayload(encKey, payload).then(function (blob) {
+                                        return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) }).then(function (put) {
+                                            if (!(put && put.ok)) return { ok: false, reason: 'http', updatedAt: res.updatedAt || null };
+                                            _lastAppliedFp = localFp;   // server now holds exactly this
+                                            return { ok: true, pushed: true, changed: !!pulledChanged, updatedAt: put.updatedAt || null };
+                                        });
+                                    });
+                                });
+                            });
+                        });
+                    });
+                });
+            });
+        })['catch'](function () { return { ok: false, reason: 'error' }; });
     }
 
     function cloudSignUp(username, pass) {
@@ -951,8 +999,28 @@
     // ?headless=1 there is no visible dashboard to reload: no auth gate, no
     // poller/re-render loop - just an exported window.__maridewSync the host
     // evaluates on each native tick.
+    //
+    //   pull()  - cloud -> local only
+    //   push()  - local -> cloud only, when local tables differ from what the
+    //             cloud already holds (pull-merge runs first to avoid clobbering
+    //             concurrent edits from another device)
+    //   sync()  - one full pull + conditional push; the Android background
+    //             service calls this so entries flow both ways while the app
+    //             is closed.
     if (/[?&]headless=1/.test(location.search) || /\/sync\.html$/.test(location.pathname)) {
         window.__maridewSync = {
+            sync: function () {
+                return sessionReady().then(function (uid) {
+                    if (!uid) return JSON.stringify({ ok: false, reason: 'no-session' });
+                    return headlessSync(uid).then(function (r) { return JSON.stringify(r); });
+                })['catch'](function (e) { return JSON.stringify({ ok: false, reason: 'error', error: (e && e.message) || String(e) }); });
+            },
+            push: function () {
+                return sessionReady().then(function (uid) {
+                    if (!uid) return JSON.stringify({ ok: false, reason: 'no-session' });
+                    return headlessSync(uid, { pull: false }).then(function (r) { return JSON.stringify(r); });
+                })['catch'](function (e) { return JSON.stringify({ ok: false, reason: 'error', error: (e && e.message) || String(e) }); });
+            },
             pull: function () {
                 return sessionReady().then(function (uid) {
                     if (!uid) return JSON.stringify({ ok: false, reason: 'no-session' });
