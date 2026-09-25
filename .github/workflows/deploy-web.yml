@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - 'MaridewFinance.App/wwwroot/**'
+      - 'tests/**'
       - '.github/workflows/deploy-web.yml'
 
 permissions:
