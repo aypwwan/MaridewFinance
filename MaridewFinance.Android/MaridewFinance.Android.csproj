@@ -25,7 +25,7 @@
     <ApplicationId>com.maridew.finance</ApplicationId>
     <ApplicationTitle>Maridew Finance</ApplicationTitle>
     <ApplicationVersion>10005</ApplicationVersion>
-    <ApplicationVersionName>1.0.5</ApplicationVersionName>
+    <ApplicationVersionName>1.0.6</ApplicationVersionName>
 
     <!-- Android 8.0+. The system WebView is a component that updates via Play,
          but very old OS builds ship WebViews too old for reliable WebCrypto/
