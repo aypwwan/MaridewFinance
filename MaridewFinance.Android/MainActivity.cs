@@ -64,11 +64,41 @@ namespace MaridewFinance.AndroidApp
             // delivers to the existing running service).
             try { StartForegroundService(new Intent(this, typeof(SyncService))); }
             catch { /* e.g. foreground-service restrictions; the app still syncs while open */ }
+
+            // One-time, polite prompt to exempt the app from battery
+            // optimization so the 5-minute tick survives Doze and OEM savers.
+            PromptBatteryOptimizationOnce();
+
             // Assets are embedded under Assets/wwwroot (see the csproj Link), so
             // the /assets/ handler maps /assets/wwwroot/* onto them.
             webView.LoadUrl("https://appassets.androidplatform.net/assets/wwwroot/index.html");
 
             SetContentView(webView);
+        }
+
+        /// <summary>
+        /// Android (and especially OEM skins) freeze or kill background
+        /// services to save power. The system dialog lets the user opt out for
+        /// THIS app only; we ask once and remember the answer in prefs.
+        /// </summary>
+        private void PromptBatteryOptimizationOnce()
+        {
+            try
+            {
+                var pm = (PowerManager)GetSystemService(PowerService)!;
+                var prefs = GetSharedPreferences("maridew", FileCreationMode.Private)!;
+                if (!pm.IsIgnoringBatteryOptimizations(PackageName) &&
+                    prefs.GetBoolean("batteryPrompted", false) == false)
+                {
+                    prefs.Edit()!.PutBoolean("batteryPrompted", true)!.Apply();
+                    StartActivity(new Intent(global::Android.Provider.Settings.ActionIgnoreBatteryOptimizationSettings));
+                }
+            }
+            catch (System.Exception ex)
+            {
+                // A missing settings screen on some OEMs must never break launch.
+                global::Android.Util.Log.Warn("maridew", "battery prompt failed: " + ex.Message);
+            }
         }
 
         /// <summary>

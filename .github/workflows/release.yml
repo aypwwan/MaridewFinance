@@ -38,7 +38,37 @@ permissions:
   contents: write
 
 jobs:
+  web-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # Same gate as the Pages deploy: no release ships a dashboard or sync
+      # bridge with a syntax error, and the sync-core merge tests must pass.
+      - name: Parse-check and unit-test web scripts
+        run: |
+          node tests/parse-check.js
+          node tests/run-tests.js
+
+  desktop-tests:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Run desktop unit tests
+        run: dotnet test MaridewFinance.Tests/MaridewFinance.Tests.csproj -c Release
+
   windows-installer:
+    needs: [web-checks]
     runs-on: windows-latest
     timeout-minutes: 30
     defaults:
@@ -153,6 +183,7 @@ jobs:
           if-no-files-found: error
 
   android-apk:
+    needs: [web-checks]
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -201,6 +232,12 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" > /dev/null
 
       - name: Build signed APK
+        env:
+          # Empty when the secrets are absent -> the committed repo keystore
+          # and its documented passwords are used (see RELEASE.md).
+          MARIDEW_ANDROID_KEYSTORE: ${{ secrets.MARIDEW_ANDROID_KEYSTORE }}
+          MARIDEW_ANDROID_KEYPASS: ${{ secrets.MARIDEW_ANDROID_KEYPASS }}
+          MARIDEW_ANDROID_STOREPASS: ${{ secrets.MARIDEW_ANDROID_STOREPASS }}
         run: |
           dotnet publish MaridewFinance.Android/MaridewFinance.Android.csproj -c Release \
             -p:ApplicationVersionName='${{ steps.ver.outputs.version }}' \
@@ -223,7 +260,7 @@ jobs:
           if-no-files-found: error
 
   publish-release:
-    needs: [windows-installer, android-apk]
+    needs: [windows-installer, android-apk, desktop-tests]
     runs-on: windows-latest
     timeout-minutes: 10
     defaults:

@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Maridew Finance - Financial Intelligence & Wealth Management</title>
+    <!-- PWA: installable web app. The service worker only caches the app
+         shell (data lives in IndexedDB); registration is skipped inside
+         WebView2/Android WebView where the app is already native-hosted. -->
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" type="image/png" href="icons/icon-192.png">
+    <meta name="theme-color" content="#090D16">
     <!-- Local assets (offline-capable): Tailwind CSS -->
     <script src="vendor/tailwind.js"></script>
     <!-- Local assets: Chart.js -->
@@ -15,7 +21,21 @@
     <!-- Browser-only bridge: no-ops inside WebView2, activates in a plain
          browser so the SAME dashboard runs online with IndexedDB storage.
          Must load before the main script (which probes hostObjects). -->
+    <script src="sync-core.js"></script>
     <script src="web-bridge.js"></script>
+    <script>
+        // PWA service worker (browser edition only - skipped inside WebView2
+        // hosts, where the app is already desktop/Android native).
+        (function () {
+            var hosted = false;
+            try { hosted = !!(window.chrome && window.chrome.webview && window.chrome.webview.hostObjects && window.chrome.webview.hostObjects.dbBridge); } catch (e) { }
+            if ('serviceWorker' in navigator && !hosted) {
+                window.addEventListener('load', function () {
+                    navigator.serviceWorker.register('./sw.js').catch(function () { /* best effort */ });
+                });
+            }
+        })();
+    </script>
 
     <script>
         tailwind.config = {
@@ -661,9 +681,9 @@
                                 <i data-lucide="printer" class="w-3.5 h-3.5"></i>
                                 <span>Print Report</span>
                             </button>
-                            <button onclick="exportCSV()" class="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2 rounded-xl transition shadow-lg shadow-indigo-600/30">
+                            <button onclick="exportAllCSV()" class="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2 rounded-xl transition shadow-lg shadow-indigo-600/30">
                                 <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5"></i>
-                                <span>Export Complete XLSX</span>
+                                <span>Export All Data (CSV)</span>
                             </button>
                         </div>
                     </div>
@@ -3784,6 +3804,52 @@ closeModal('categoryModal');
             a.setAttribute('download', `MaridewFinance-Ledger-${new Date().toISOString().slice(0,10)}.csv`);
             a.click();
             showToast('Financial CSV export complete.');
+        }
+
+        // Complete export: every table as a labelled section in one CSV
+        // (Excel/Sheets open it fine; a real .xlsx would need a library).
+        // Shares exportCSV's formula-injection guard and quoting rules.
+        function exportAllCSV() {
+            const safe = v => {
+                const s = String(v == null ? '' : v);
+                return /^[=+@\t-]/.test(s) ? `'${s}` : s;
+            };
+            const q = v => {
+                const s = safe(v);
+                return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+            };
+            const rowsToCsv = rows => {
+                if (!rows || !rows.length) return '';
+                const cols = Object.keys(rows[0]);
+                let out = cols.join(',') + '\n';
+                rows.forEach(r => { out += cols.map(c => q(r[c])).join(',') + '\n'; });
+                return out;
+            };
+            const sections = [
+                ['TRANSACTIONS', state.transactions],
+                ['BUDGETS', state.budgets],
+                ['LOANS', state.loans],
+                ['SAVINGS GOALS', state.savingsGoals],
+                ['SAVINGS TRANSACTIONS', state.savingsTransactions],
+                ['LOAN TRANSACTIONS', state.loanTransactions],
+                ['CATEGORIES', state.categories],
+                ['ACCOUNTS', state.accounts]
+            ];
+            let csv = 'Maridew Finance complete export,' + new Date().toISOString().slice(0, 10) + '\n';
+            let exported = 0;
+            sections.forEach(([name, rows]) => {
+                if (!rows || !rows.length) return;
+                csv += '\n' + name + '\n' + rowsToCsv(rows);
+                exported += rows.length;
+            });
+            if (!exported) { showToast('Nothing to export yet.'); return; }
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.setAttribute('href', url);
+            a.setAttribute('download', `MaridewFinance-Complete-${new Date().toISOString().slice(0,10)}.csv`);
+            a.click();
+            showToast(`Complete export: ${exported} rows across all tables.`);
         }
 
         // ----------------- CHART.JS INITIALIZATIONS -----------------

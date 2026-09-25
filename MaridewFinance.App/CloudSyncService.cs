@@ -519,6 +519,23 @@ namespace MaridewFinance.App
                     return;
                 }
 
+                // /password bumped the server's token version, which revoked
+                // every token - including this machine's. Sign in again with the
+                // new password so the desktop keeps a live token.
+                var reauth = await PostJson("/signin", new Dictionary<string, object>
+                {
+                    ["username"] = nameLower,
+                    ["authHash"] = newAuth
+                });
+                if (reauth != null && IsOk(reauth) &&
+                    reauth["token"] is JsonValue tk && tk.TryGetValue<string>(out var newToken))
+                {
+                    lock (_gate)
+                    {
+                        _state.Token = newToken;
+                    }
+                }
+
                 lock (_gate)
                 {
                     _state.EncKey = Convert.ToBase64String(newEnc);
@@ -560,6 +577,8 @@ namespace MaridewFinance.App
 
             var payload = new JsonObject
             {
+                ["schema"] = SupportedSchema,               // schema gate on the receiving side
+                ["clientVersion"] = UpdateService.CurrentVersion,
                 ["tables"] = tables,
                 ["settings"] = settings
             };
@@ -657,6 +676,15 @@ namespace MaridewFinance.App
         {
             var bridge = App.Bridge;
             if (bridge == null) return;
+
+            // Refuse payloads written by a newer schema instead of mis-merging
+            // them (mirrors checkSchema in sync-core.js on web/Android).
+            int schema = cloudPayload["schema"] is JsonValue sv && sv.TryGetValue<int>(out var s) ? s : 1;
+            if (schema > SupportedSchema)
+            {
+                SetError($"This cloud data was written by a newer version of Maridew Finance (schema {schema}). Update this app before syncing.");
+                return;
+            }
 
             JsonObject? cloudTables = cloudPayload["tables"] as JsonObject;
             if (cloudTables == null) return;
@@ -784,6 +812,10 @@ namespace MaridewFinance.App
         // --------------------------------------------------------- tombstones
 
         internal const int TombstoneRetentionDays = 30;
+
+        // Bump alongside sync-core.js's SUPPORTED_SCHEMA when the encrypted
+        // payload layout changes in a way older clients cannot safely merge.
+        internal const int SupportedSchema = 2;
 
         internal static Dictionary<string, Dictionary<long, string>> TombstonesFromJson(string? json)
         {
@@ -1064,6 +1096,11 @@ namespace MaridewFinance.App
                 {
                     var loaded = JsonSerializer.Deserialize<CloudState>(File.ReadAllText(_statePath));
                     if (loaded != null) _state = loaded;
+                    // cloudsync.json sits in %LOCALAPPDATA% where any process
+                    // running as the same Windows user can read it; DPAPI wraps
+                    // the one secret inside (the AES sync key) so it is only
+                    // recoverable under THIS Windows profile.
+                    _state.EncKey = Unprotect(_state.EncKey);
                 }
             }
             catch
@@ -1085,11 +1122,42 @@ namespace MaridewFinance.App
         {
             try
             {
-                File.WriteAllText(_statePath, JsonSerializer.Serialize(_state));
+                var copy = JsonSerializer.Deserialize<CloudState>(JsonSerializer.Serialize(_state))!;
+                copy.EncKey = Protect(_state.EncKey);   // DPAPI on disk, plaintext only in memory
+                File.WriteAllText(_statePath, JsonSerializer.Serialize(copy));
             }
             catch
             {
                 // Never break the app over state persistence.
+            }
+        }
+
+        // DPAPI helpers: empty/no-op-friendly so legacy plaintext files and
+        // failures degrade to today's behavior rather than breaking sync.
+        private static string Protect(string plain)
+        {
+            if (string.IsNullOrEmpty(plain)) return plain;
+            try
+            {
+                var bytes = System.Text.Encoding.UTF8.GetBytes(plain);
+                var encrypted = System.Security.Cryptography.ProtectedData.Protect(bytes, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                return "dpapi:" + Convert.ToBase64String(encrypted);
+            }
+            catch { return plain; }   // degrade to plaintext rather than fail
+        }
+
+        private static string Unprotect(string stored)
+        {
+            if (string.IsNullOrEmpty(stored) || !stored.StartsWith("dpapi:", StringComparison.Ordinal)) return stored;
+            try
+            {
+                var bytes = Convert.FromBase64String(stored.Substring("dpapi:".Length));
+                var plain = System.Security.Cryptography.ProtectedData.Unprotect(bytes, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                return System.Text.Encoding.UTF8.GetString(plain);
+            }
+            catch
+            {
+                return "";   // unreadable under this profile: re-link sync instead of crashing
             }
         }
 

@@ -15,12 +15,16 @@ namespace MaridewFinance.AndroidApp
     /// Keeps sync alive while the app is closed: a foreground service that
     /// hosts a hidden WebView running the SAME page storage as the visible
     /// app (same IndexedDB origin) and calls the bridge's headless
-    /// __maridewSync.sync() on a native timer. Each tick pulls the cloud,
-    /// merges it, and pushes local tables back ONLY when they differ from
-    /// the cloud, so entries flow both ways while the app is closed without
-    /// churning the cloud's updatedAt on idle devices. New incoming entries
-    /// raise a notification; successful pushes just refresh the quiet
-    /// foreground-service notification with the last sync time.
+    /// __maridewSync.sync() on a timer. Each tick pulls the cloud, merges it,
+    /// and pushes local tables back ONLY when they differ from the cloud, so
+    /// entries flow both ways while the app is closed without churning the
+    /// cloud's updatedAt on idle devices. New incoming entries raise a
+    /// notification; successful pushes just refresh the quiet foreground-
+    /// service notification with the last sync time.
+    ///
+    /// The tick is driven by AlarmManager (setExactAndAllowWhileIdle when
+    /// permitted, inexact otherwise) rather than an in-process Handler, so it
+    /// survives Doze and does not depend on the process staying scheduled.
     /// </summary>
     [Service(Name = "com.maridew.finance.SyncService", Exported = false, ForegroundServiceType = ForegroundService.TypeSpecialUse)]
     [Register("com.maridew.finance.SyncService")]
@@ -28,12 +32,16 @@ namespace MaridewFinance.AndroidApp
     {
         private const string ChannelId = "maridew_sync";
         private const int NotifyId = 1001;
-        private const long PullIntervalMs = 5 * 60 * 1000;   // every 5 minutes
+        private const long SyncIntervalMs = 5 * 60 * 1000;      // every 5 minutes
+        private const long TickGraceMs = 4000;                  // page load + evaluate slack
+        private const int MaxSilentFailures = 6;                // ~30 min before one heads-up
 
         private WebView? _webView;
         private Handler? _handler;
         private Java.Lang.Runnable? _tickRunnable;
         private bool _pageReady;
+        private bool _ticking;
+        private int _consecutiveFailures;
 
         // The interface object is injected as "MaridewSyncBridge"; the page calls
         // MaridewSyncBridge.deliverResult(json) with each sync result.
@@ -65,7 +73,8 @@ namespace MaridewFinance.AndroidApp
             _webView.AddJavascriptInterface(new Deliver(this), "MaridewSyncBridge");
             _webView.LoadUrl("https://appassets.androidplatform.net/assets/wwwroot/sync.html");
 
-            ScheduleNextTick(15_000);   // first pull shortly after start
+            ScheduleNextAlarm(SyncIntervalMs / 6);   // first tick ~50s after start
+            ScheduleTick(0);                          // and start the in-process fallback loop
         }
 
         public override StartCommandResult OnStartCommand(Intent? intent, StartCommandFlags flags, int startId)
@@ -80,7 +89,40 @@ namespace MaridewFinance.AndroidApp
             base.OnDestroy();
         }
 
-        private void ScheduleNextTick(long delayMs)
+        // ------------------------------------------------------------ ticking
+
+        /// <summary>
+        /// AlarmManager backup for the in-process loop: fires
+        /// SyncTickReceiver even when the process is frozen in Doze, which
+        /// starts this service (idempotent) and lets it tick immediately.
+        /// </summary>
+        internal void ScheduleNextAlarm(long delayMs)
+        {
+            try
+            {
+                var am = (AlarmManager)GetSystemService(AlarmService)!;
+                var pi = PendingIntent.GetBroadcast(this, 0, new Intent(this, typeof(SyncTickReceiver)),
+                    PendingIntentFlags.UpdateCurrent | (Build.VERSION.SdkInt >= BuildVersionCodes.S
+                        ? PendingIntentFlags.Immutable : 0));
+                var trigger = Java.Lang.JavaSystem.CurrentTimeMillis() + delayMs;
+                if (Build.VERSION.SdkInt >= BuildVersionCodes.S &&
+                    am.CanScheduleExactAlarms())
+                {
+                    am.SetExactAndAllowWhileIdle(AlarmType.RtcWakeup, trigger, pi);
+                }
+                else
+                {
+                    am.SetAndAllowWhileIdle(AlarmType.RtcWakeup, trigger, pi);
+                }
+            }
+            catch (System.Exception ex)
+            {
+                // Alarms are a redundancy, not the primary tick; never fatal.
+                global::Android.Util.Log.Warn("maridew", "alarm scheduling failed: " + ex.Message);
+            }
+        }
+
+        private void ScheduleTick(long delayMs)
         {
             if (_handler is null) return;
             if (_tickRunnable is not null) _handler.RemoveCallbacks(_tickRunnable);
@@ -90,33 +132,59 @@ namespace MaridewFinance.AndroidApp
 
         private void Tick()
         {
-            if (_webView is null) return;
+            if (_webView is null || _handler is null) return;
+            if (_ticking) { ScheduleNextTick(); return; }   // previous tick still running
+            _ticking = true;
             _pageReady = false;
             _webView.Reload();
             // The client flips _pageReady on finish; a small grace covers it.
-            _handler!.PostDelayed(new Runnable(() =>
+            _handler.PostDelayed(new Runnable(() =>
             {
-                if (_webView is null) return;
-                if (_pageReady) _webView.EvaluateJavascript(SyncJs, null);
-                ScheduleNextTick(PullIntervalMs);
-            }), 4000);
+                if (_webView is null) { _ticking = false; return; }
+                if (_pageReady)
+                {
+                    // Hold a wakelock for the tick so Doze cannot freeze the
+                    // WebView fetch halfway; released in OnSyncResult.
+                    TickWakeLock.Acquire(this);
+                    _webView.EvaluateJavascript(SyncJs, null);
+                }
+                else
+                {
+                    _ticking = false;
+                }
+                ScheduleNextTick();
+            }), TickGraceMs);
+        }
+
+        private void ScheduleNextTick()
+        {
+            ScheduleTick(SyncIntervalMs);
+            ScheduleNextAlarm(SyncIntervalMs + 30_000);   // alarm slightly after the loop's own tick
         }
 
         private void OnSyncResult(string? json)
         {
+            _ticking = false;
+            TickWakeLock.Release(this);
             global::Android.Util.Log.Info("maridew", "sync result: " + (json ?? "<null>"));
             try
             {
                 if (string.IsNullOrEmpty(json)) return;
                 var j = new Org.Json.JSONObject(json);
-                if (!j.OptBoolean("ok", false)) return;   // no-session/no-token/network: quietly retry next tick
+                if (!j.OptBoolean("ok", false))
+                {
+                    NoteFailure("Sync failed: " + (j.OptString("reason", "unknown") ?? "unknown"));
+                    return;   // no-session/no-token/network: quietly retry next tick
+                }
+
+                _consecutiveFailures = 0;   // a clean round trip, idle or not
 
                 // Pushed local changes: refresh the quiet foreground-service
                 // notification ("Last synced HH:mm") - no user-facing alert,
                 // uploads are the device's own edits.
                 if (j.OptBoolean("pushed", false))
                 {
-                    UpdateForegroundText("Background sync active - last synced " + DateTime.Now.ToString("HH:mm") + ".");
+                    UpdateForegroundText("Background sync active - last synced " + System.DateTime.Now.ToString("HH:mm") + ".");
                 }
 
                 // Pulled remote changes: raise a user notification.
@@ -138,6 +206,28 @@ namespace MaridewFinance.AndroidApp
                 // Never let notification formatting kill the service.
                 global::Android.Util.Log.Error("maridew", "sync handling failed: " + ex);
             }
+        }
+
+        /// <summary>
+        /// After several consecutive failed ticks, say so once instead of
+        /// failing silently forever (e.g. expired token after a password
+        /// change, or the sync server being down).
+        /// </summary>
+        private void NoteFailure(string detail)
+        {
+            _consecutiveFailures++;
+            if (_consecutiveFailures != MaxSilentFailures) return;   // exactly once per failure streak
+            var pi = PendingIntent.GetActivity(this, 0, PackageManager!.GetLaunchIntentForPackage(PackageName!)!,
+                PendingIntentFlags.UpdateCurrent | (Build.VERSION.SdkInt >= BuildVersionCodes.M ? PendingIntentFlags.Immutable : 0));
+            var builder = Build.VERSION.SdkInt >= BuildVersionCodes.O
+                ? new Notification.Builder(this, ChannelId)
+                : new Notification.Builder(this);
+            builder.SetSmallIcon(global::MaridewFinance.Android.Resource.Mipmap.ic_launcher)
+                .SetContentTitle("Maridew Finance")
+                .SetContentText(detail + " - open the app to re-check sync.")
+                .SetAutoCancel(true)
+                .SetContentIntent(pi);
+            ((NotificationManager)GetSystemService(NotificationService)!).Notify(2003, builder.Build());
         }
 
         private void Notify(string text)
@@ -193,6 +283,36 @@ namespace MaridewFinance.AndroidApp
             else
             {
                 StartForeground(NotifyId, builder.Build());
+            }
+        }
+
+        /// <summary>Short wakelock so a tick's network work survives Doze.</summary>
+        private static class TickWakeLock
+        {
+            private const string Tag = "maridew:tick";
+            private static PowerManager.WakeLock? _wl;
+
+            public static void Acquire(Context ctx)
+            {
+                try
+                {
+                    if (_wl == null)
+                    {
+                        var pm = (PowerManager)ctx.GetSystemService(PowerService)!;
+                        _wl = pm.NewWakeLock(WakeLockFlags.Partial, Tag);
+                        _wl.SetReferenceCounted(false);
+                    }
+                    _wl.Acquire(60_000);   // hard cap: a tick should take seconds
+                }
+                catch (System.Exception ex)
+                {
+                    global::Android.Util.Log.Warn("maridew", "wakelock acquire failed: " + ex.Message);
+                }
+            }
+
+            public static void Release(Context ctx)
+            {
+                try { _wl?.Release(); } catch { /* already released */ }
             }
         }
 

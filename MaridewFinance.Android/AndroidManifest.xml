@@ -8,6 +8,12 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+  <!-- Keeps the CPU awake for the few seconds a sync tick needs, so the
+       WebView fetch completes even when the device dozes mid-tick. -->
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <!-- Lets the app offer (once) to exempt itself from battery optimization so
+       the 5-minute sync tick survives Doze and OEM battery savers. -->
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
   <!-- Needed on 13+ to show the "new entries arrived" notifications. -->
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -15,9 +21,13 @@
       android:label="@string/app_name"
       android:icon="@mipmap/ic_launcher"
       android:roundIcon="@mipmap/ic_launcher_round"
-      android:allowBackup="true"
+      android:allowBackup="false"
       android:supportsRtl="true"
       android:theme="@style/MaridewTheme">
+
+    <!-- allowBackup is false: the sandbox holds plaintext IndexedDB rows, and
+         Google's device-to-device backup would silently copy them. Encrypted
+         cloud sync is the app's backup path instead. -->
 
     <service
         android:name="com.maridew.finance.SyncService"
@@ -26,6 +36,12 @@
       <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps encrypted financial sync running so entries arrive while the app is closed." />
     </service>
+
+    <!-- Doze-proof tick: the exact/inexact alarm wakes the service even when
+         the Handler timer inside the process is frozen. -->
+    <receiver android:name="com.maridew.finance.SyncTickReceiver"
+              android:enabled="true"
+              android:exported="false" />
 
     <receiver android:name="com.maridew.finance.BootReceiver"
               android:enabled="true"

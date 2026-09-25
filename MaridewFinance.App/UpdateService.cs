@@ -305,7 +305,16 @@ namespace MaridewFinance.App
             }
 
             var expected = JsonField(File.ReadAllText(Path.Combine(_updateDir, "latest.json")), "sha256");
-            if (expected != "" && actual.ToLower() != expected.ToLower())
+            // Refuse to install unless the feed's checksum matches. An empty
+            // hash in the feed is treated as a broken feed, not a pass: the
+            // auto-update chain is a supply-chain surface, so verification is
+            // mandatory, never optional.
+            if (expected == "")
+            {
+                SetError("The update feed did not include a checksum — refusing to install it. Please download the installer manually.");
+                return;
+            }
+            if (!string.Equals(actual.Trim(), expected.Trim(), StringComparison.OrdinalIgnoreCase))
             {
                 SetError("Downloaded file failed the checksum check. Please try again.");
                 return;

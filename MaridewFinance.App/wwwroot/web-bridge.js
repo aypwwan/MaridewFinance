@@ -104,6 +104,15 @@
     // skip tombstoned ids, and the log rides inside the encrypted payload.
     var TOMBSTONE_RETENTION_DAYS = 30;
 
+    // Pure merge/tombstone/schema logic lives in sync-core.js so the shipped
+    // merge code and the tested merge code are literally the same file.
+    var Core = window.MaridewSyncCore;
+    var recordTombstones = Core.recordTombstones;
+    var mergeTombstones = Core.mergeTombstones;
+    var pruneTombstones = Core.pruneTombstones;
+    var tombstonedIds = Core.tombstonedIds;
+    var mergeRowsById = Core.mergeRowsById;
+
     function getTombstones(uid) {
         return dbGet(STORE_KV, tombstonesKey(uid)).then(function (row) {
             return (row && row.v) || {};
@@ -111,41 +120,6 @@
     }
     function putTombstones(uid, tombs) {
         return dbPut(STORE_KV, { k: tombstonesKey(uid), v: tombs });
-    }
-    function recordTombstones(tombs, table, ids, at) {
-        var per = tombs[table] || {};
-        ids.forEach(function (id) {
-            var key = String(id);
-            if (!per[key] || String(per[key]) < at) per[key] = at;
-        });
-        tombs[table] = per;
-    }
-    function mergeTombstones(base, incoming) {
-        Object.keys(incoming || {}).forEach(function (table) {
-            var per = base[table] || {};
-            Object.keys(incoming[table]).forEach(function (id) {
-                var at = incoming[table][id];
-                if (!per[id] || String(per[id]) < String(at)) per[id] = at;
-            });
-            base[table] = per;
-        });
-        return base;
-    }
-    function pruneTombstones(tombs, maxAgeDays) {
-        var cutoff = Date.now() - maxAgeDays * 86400000;
-        Object.keys(tombs).forEach(function (table) {
-            var per = tombs[table];
-            Object.keys(per).forEach(function (id) {
-                var t = Date.parse(per[id]);
-                if (isNaN(t) || t < cutoff) delete per[id];
-            });
-            if (!Object.keys(per).length) delete tombs[table];
-        });
-        return tombs;
-    }
-    function tombstonedIds(tombs, table) {
-        var per = tombs[table] || {};
-        return Object.keys(per).map(Number);
     }
 
     // --------------------------------------------------------------- crypto
@@ -284,6 +258,8 @@
     }
 
     function applyCloudPayload(uid, payload) {
+        var schemaErr = Core.checkSchema(payload);
+        if (schemaErr) return Promise.reject(new Error(schemaErr));
         var fp = JSON.stringify(payload && payload.tables);
         var incomingTombs = (payload && payload.tombstones) || {};
         var readOps = TABLES.map(function (tb) {
@@ -318,30 +294,6 @@
         });
     }
 
-    // Union of local + cloud rows by id, honoring the deletion log: rows
-    // whose id is tombstoned are dropped from BOTH sides (a deleted row stays
-    // deleted; the cloud copy wins conflicts for everything else).
-    function mergeRowsById(localRows, cloudRows, tombstones) {
-        var tombs = tombstones || {};
-        var seen = {};
-        var out = [];
-        (cloudRows || []).forEach(function (r) {
-            if (r && r.id != null) {
-                var key = String(r.id);
-                if (tombs[key]) return;              // deleted: never resurrect
-                seen[key] = true;
-                out.push(r);
-            }
-        });
-        (localRows || []).forEach(function (r) {
-            if (r && r.id != null && !seen[String(r.id)]) {
-                if (tombs[String(r.id)]) return;     // locally tombstoned by another device: drop
-                out.push(r);
-            }
-        });
-        return out;
-    }
-
     function pullCloudData(uid, encKey) {
         return getCloudToken(uid).then(function (token) {
             if (!token) return;
@@ -356,6 +308,14 @@
 
     var _pushTimer = null;
     var _lastAppliedFp = null;   // payload fingerprint already merged/applied
+
+    // The sync worker rejects uploads above 4 MB; surface a warning well
+    // before that so users can archive instead of hitting a hard failure.
+    function blobSizeWarning(blob) {
+        if (!blob || blob.length <= Core.BLOB_SOFT_LIMIT_BYTES) return null;
+        return 'Cloud data is ' + (blob.length / 1000000).toFixed(1) + ' MB — nearing the sync server\'s size limit. Consider archiving old entries.';
+    }
+
     function scheduleCloudPush() {
         if (!SYNC_SERVER) return;
         if (_pushTimer) clearTimeout(_pushTimer);
@@ -373,7 +333,7 @@
             return dbBridge.LoadAll().then(function (allJson) {
                 return dbGet(STORE_KV, settingsKey(uid)).then(function (row) {
                     return getTombstones(uid).then(function (tombs) {
-                        var payload = { tables: JSON.parse(allJson), settings: (row && row.v) || {}, tombstones: pruneTombstones(tombs, TOMBSTONE_RETENTION_DAYS) };
+                        var payload = { schema: Core.SUPPORTED_SCHEMA, clientVersion: WEB_VERSION, tables: JSON.parse(allJson), settings: (row && row.v) || {}, tombstones: pruneTombstones(tombs, TOMBSTONE_RETENTION_DAYS) };
                         return getCloudEncKey(uid).then(function (encKey) {
                             if (!encKey) return;
                             // Pull-merge BEFORE pushing: this browser's snapshot may be
@@ -392,6 +352,8 @@
                                 }
                             }).then(function () {
                                 return encryptPayload(encKey, payload).then(function (blob) {
+                                    var sizeWarn = blobSizeWarning(blob);
+                                    if (sizeWarn) console.warn('[maridew] ' + sizeWarn);
                                     return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) }).then(function (res) {
                                         if (res && res.ok) {
                                             _lastAppliedFp = JSON.stringify(payload.tables);   // server now holds exactly this
@@ -433,12 +395,14 @@
                             }
                             return dbGet(STORE_KV, settingsKey(uid)).then(function (row) {
                                 return getTombstones(uid).then(function (tombs) {
-                                    var payload = { tables: JSON.parse(allJson), settings: (row && row.v) || {}, tombstones: pruneTombstones(tombs, TOMBSTONE_RETENTION_DAYS) };
+                                    var payload = { schema: Core.SUPPORTED_SCHEMA, clientVersion: WEB_VERSION, tables: JSON.parse(allJson), settings: (row && row.v) || {}, tombstones: pruneTombstones(tombs, TOMBSTONE_RETENTION_DAYS) };
                                     return encryptPayload(encKey, payload).then(function (blob) {
+                                        var sizeWarn = blobSizeWarning(blob);
+                                        if (sizeWarn) console.warn('[maridew] ' + sizeWarn);
                                         return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) }).then(function (put) {
                                             if (!(put && put.ok)) return { ok: false, reason: 'http', updatedAt: res.updatedAt || null };
                                             _lastAppliedFp = localFp;   // server now holds exactly this
-                                            return { ok: true, pushed: true, changed: !!pulledChanged, updatedAt: put.updatedAt || null };
+                                            return { ok: true, pushed: true, changed: !!pulledChanged, updatedAt: put.updatedAt || null, warning: sizeWarn };
                                         });
                                     });
                                 });
@@ -496,8 +460,10 @@
                     // stranding the data under a key nobody can derive.
                     return pullCloudData(uid, oldKeys.encKey).then(function () {
                         return Promise.all([dbBridge.LoadAll(), dbGet(STORE_KV, settingsKey(uid)), getTombstones(uid)]).then(function (results) {
-                            var payload = { tables: JSON.parse(results[0]), settings: (results[1] && results[1].v) || {}, tombstones: pruneTombstones(results[2] || {}, TOMBSTONE_RETENTION_DAYS) };
+                            var payload = { schema: Core.SUPPORTED_SCHEMA, clientVersion: WEB_VERSION, tables: JSON.parse(results[0]), settings: (results[1] && results[1].v) || {}, tombstones: pruneTombstones(results[2] || {}, TOMBSTONE_RETENTION_DAYS) };
                             return encryptPayload(newKeys.encKey, payload).then(function (blob) {
+                                var sizeWarn = blobSizeWarning(blob);
+                                if (sizeWarn) console.warn('[maridew] ' + sizeWarn);
                                 return cloudApi('/data', { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ blob: blob }) });
                             });
                         });
@@ -507,8 +473,17 @@
                             return cloudApi('/password', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ newAuthHash: newKeys.authHex }) }).then(function (res) {
                                 if (!res.ok) return fail(res.error || 'Password update failed - please try again to complete the change.');
                                 user.authHash = newKeys.authHex;
-                                return dbPut(STORE_USERS, user)
-                                    .then(function () { return JSON.stringify({ ok: true }); });
+                                return dbPut(STORE_USERS, user).then(function () {
+                                    // The server bumped its token version, which revoked
+                                    // every token - including this device's. Re-auth with
+                                    // the new password so sync continues seamlessly.
+                                    return cloudApi('/signin', { method: 'POST', body: JSON.stringify({ username: user.username, authHash: newKeys.authHex }) }).then(function (si) {
+                                        if (si && si.ok && si.token) {
+                                            return saveCloudToken(uid, si.token).then(function () { return JSON.stringify({ ok: true }); });
+                                        }
+                                        return JSON.stringify({ ok: true, warning: 'Password changed, but this device must sign in again to resume syncing.' });
+                                    });
+                                });
                             });
                         });
                     });

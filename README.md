@@ -256,3 +256,24 @@ Notes:
   Finance tables) and a safety snapshot of the current data is taken first.
 - To change the app name/window title, edit the `Title` property in
   `MainWindow.xaml` and the `<title>` tag in `wwwroot/index.html`.
+
+## Tests & release process
+
+- `tests/run-tests.js` — unit tests for the shared sync merge/tombstone/schema
+  logic (`wwwroot/sync-core.js`, the exact file the web and Android editions
+  ship). Run with `node tests/run-tests.js`.
+- `tests/parse-check.js` — syntax-validates every shipped script (standalone
+  JS **and** inline `<script>` blocks), so a typo can never take the whole
+  dashboard - or the Android background-sync bridge - offline again.
+- `MaridewFinance.Tests/` — xUnit tests for the desktop sync logic
+  (fingerprints, merges, tombstones, blob codec, KDF): `dotnet test`.
+- CI runs all three on every web deploy and before every release build.
+- Tagging, version markers, the versionCode formula, signing overrides, and
+  the update feed are documented in [RELEASE.md](RELEASE.md).
+
+### Web edition as an app (PWA)
+
+The GitHub Pages edition is installable: browsers offer "Install Maridew
+Finance" (or "Add to Home Screen" on iOS), and the app shell is cached so it
+opens offline. All data stays in IndexedDB on the device, exactly as in the
+browser tab.

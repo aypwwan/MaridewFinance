@@ -25,6 +25,11 @@ data, and even the stored hash cannot be replayed (the server re-hashes it).
 | `POST /signin` `{username, authHash}` | — | verify, returns token + latest blob |
 | `GET /data` | Bearer | fetch encrypted blob |
 | `PUT /data` `{blob}` | Bearer | store encrypted blob (4 MB cap) |
+| `POST /password` `{newAuthHash}` | Bearer | change auth hash (bumps token version, revoking all existing tokens) |
+
+Failed sign-ins are rate-limited per username and per IP (10 failures per
+15 minutes → HTTP 429). Sign-in failures return one uniform error — the
+server never reveals whether an account exists.
 
 ## Deploy
 

@@ -18,8 +18,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # A single JS syntax error takes down the whole dashboard (or, worse,
+      # silently disables the Android background sync bridge), so parse-check
+      # every shipped script and run the sync-core unit tests before deploy.
+      - name: Parse-check and unit-test web scripts
+        run: |
+          node tests/parse-check.js
+          node tests/run-tests.js
+
   deploy:
     runs-on: ubuntu-latest
+    needs: [checks]
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>sync-core browser test runner</title>
+  <!-- Loads the SHIPPED sync-core.js and web-bridge.js; the button runs the
+       same assertions as tests/run-tests.js. Used on machines without node. -->
+  <script src="sync-core.js"></script>
+</head>
+<body>
+  <pre id="out">idle</pre>
+  <script>
+    function run() {
+      const Core = window.MaridewSyncCore;
+      const out = [];
+      let passed = 0, failed = 0;
+      const assertEq = (a, b, msg) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error((msg || 'not equal') + ' — got ' + JSON.stringify(a) + ' want ' + JSON.stringify(b)); };
+      const ok = v => !!v;
+      function t(name, fn) { try { fn(); passed++; } catch (e) { failed++; out.push('FAIL ' + name + ': ' + e.message); } }
+
+      t('union merge', () => assertEq(Core.mergeRowsById([{ id: 1 }, { id: 2 }], [{ id: 2 }, { id: 3 }], {}).map(r => r.id).sort(), [1, 2, 3]));
+      t('cloud wins conflicts', () => assertEq(Core.mergeRowsById([{ id: 1, amount: 100 }], [{ id: 1, amount: 999 }], {})[0].amount, 999));
+      t('tombstoned rows dropped', () => assertEq(Core.mergeRowsById([{ id: 1 }, { id: 2 }], [{ id: 2 }, { id: 3 }], { 2: '2026-01-01T00:00:00Z' }).map(r => r.id).sort(), [1, 3]));
+      t('empty merge', () => assertEq(Core.mergeRowsById(undefined, undefined, undefined), []));
+      t('recordTombstones latest wins', () => { const x = {}; Core.recordTombstones(x, 't', [7], '2026-01-01'); Core.recordTombstones(x, 't', [7], '2026-02-01'); Core.recordTombstones(x, 't', [7], '2025-01-01'); assertEq(x.t['7'], '2026-02-01'); });
+      t('mergeTombstones union', () => { const m = Core.mergeTombstones({ t: { 1: '2026-01-01' } }, { t: { 1: '2026-03-01', 2: 'x' }, l: { 9: 'y' } }); assertEq([m.t['1'], m.t['2'], m.l['9']], ['2026-03-01', 'x', 'y']); });
+      t('pruneTombstones', () => { const fresh = new Date(Date.now() - 86400000).toISOString(); const stale = new Date(Date.now() - 40 * 86400000).toISOString(); const x = { t: { 1: stale, 2: fresh, 3: 'bad' } }; Core.pruneTombstones(x, 30); assertEq(Object.keys(x.t), ['2']); });
+      t('prune removes empty tables', () => { const x = { b: { 1: new Date(Date.now() - 90 * 86400000).toISOString() } }; Core.pruneTombstones(x, 30); assertEq(x.b, undefined); });
+      t('tombstonedIds numeric', () => assertEq(Core.tombstonedIds({ t: { 3: 'x', 12: 'y' } }, 't'), [3, 12]));
+      t('checkSchema accepts 1/2/none', () => assertEq([Core.checkSchema({}), Core.checkSchema({ schema: 1 }), Core.checkSchema({ schema: 2 })], [null, null, null]));
+      t('checkSchema rejects 3+', () => ok(/newer/.test(Core.checkSchema({ schema: 3 }) || '')));
+      t('checkSchema null-tolerant', () => assertEq(Core.checkSchema(null), null));
+      t('exports present', () => { for (const k of ['SUPPORTED_SCHEMA', 'BLOB_SOFT_LIMIT_BYTES', 'recordTombstones', 'mergeTombstones', 'pruneTombstones', 'tombstonedIds', 'mergeRowsById', 'checkSchema']) if (!Core[k]) throw new Error('missing ' + k); });
+
+      document.getElementById('out').textContent =
+        'RESULT ' + passed + ' passed, ' + failed + ' failed' + (out.length ? '\n' + out.join('\n') : '');
+    }
+    window.addEventListener('load', run);
+  </script>
+</body>
+</html>

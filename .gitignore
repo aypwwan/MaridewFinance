@@ -4,6 +4,14 @@ installer/dist/
 
 # Signing keys and certificates — sensitive, never commit
 installer/signing/private/
+*.pfx
+*.jks
+
+# NOTE: MaridewFinance.Android/maridew.keystore IS committed on purpose so
+# local and CI builds share one stable signing key (installs upgrade in
+# place). Its passwords are not treated as secrets - see RELEASE.md. Any
+# NEW key material belongs under installer/signing/private/ or in CI
+# secrets, not in the repo root.
 
 # .NET build outputs and tooling cache
 bin/

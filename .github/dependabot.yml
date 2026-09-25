@@ -1,0 +1,15 @@
+# Supply-chain hygiene for CI: keeps the GitHub Actions in both workflows on
+# their latest major version and opens a PR when a version has a known
+# vulnerability. (Full commit-SHA pinning is the stricter alternative; this
+# repo opts for maintained-major pinning + automated updates instead.)
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "ci"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

@@ -27,6 +27,11 @@
     <ApplicationVersion>10005</ApplicationVersion>
     <ApplicationVersionName>1.0.5</ApplicationVersionName>
 
+    <!-- Android 8.0+. The system WebView is a component that updates via Play,
+         but very old OS builds ship WebViews too old for reliable WebCrypto/
+         IndexedDB behaviour in a finance app - 26 is the floor we test against. -->
+    <SupportedOSPlatformVersion>26.0</SupportedOSPlatformVersion>
+
     <!-- Keep code running under the app package for privacy, use a real app
          name for the WebView user agent and asset-loader domain. -->
     <ApplicationLabel>Maridew Finance</ApplicationLabel>
@@ -39,13 +44,21 @@
     <AndroidResgenFile>Resources\Resource.designer.cs</AndroidResgenFile>
     <AndroidResgenClass>Resource</AndroidResgenClass>
 
-    <!-- Stable release signing (repo-local keystore, used from CI too so
-         installs stay updatable in place). AndroidKeyStore enables it. -->
+    <!-- Stable release signing. The committed keystore's passwords are NOT a
+         secret worth stealing (the key's only job is install-upgrade
+         continuity - see RELEASE.md); still, both the keystore and the
+         passwords can be overridden for local or CI builds via the
+         MARIDEW_ANDROID_KEYSTORE / MARIDEW_ANDROID_KEYPASS /
+         MARIDEW_ANDROID_STOREPASS environment variables, e.g. to build with a
+         private keystore without editing this file. -->
     <AndroidKeyStore>true</AndroidKeyStore>
-    <AndroidSigningKeyStore>maridew.keystore</AndroidSigningKeyStore>
+    <AndroidSigningKeyStore Condition="'$(MARIDEW_ANDROID_KEYSTORE)' != ''">$(MARIDEW_ANDROID_KEYSTORE)</AndroidSigningKeyStore>
+    <AndroidSigningKeyStore Condition="'$(MARIDEW_ANDROID_KEYSTORE)' == ''">maridew.keystore</AndroidSigningKeyStore>
     <AndroidSigningKeyAlias>maridew</AndroidSigningKeyAlias>
-    <AndroidSigningKeyPass>maridew</AndroidSigningKeyPass>
-    <AndroidSigningStorePass>maridew</AndroidSigningStorePass>
+    <AndroidSigningKeyPass Condition="'$(MARIDEW_ANDROID_KEYPASS)' != ''">$(MARIDEW_ANDROID_KEYPASS)</AndroidSigningKeyPass>
+    <AndroidSigningKeyPass Condition="'$(MARIDEW_ANDROID_KEYPASS)' == ''">maridew</AndroidSigningKeyPass>
+    <AndroidSigningStorePass Condition="'$(MARIDEW_ANDROID_STOREPASS)' != ''">$(MARIDEW_ANDROID_STOREPASS)</AndroidSigningStorePass>
+    <AndroidSigningStorePass Condition="'$(MARIDEW_ANDROID_STOREPASS)' == ''">maridew</AndroidSigningStorePass>
   </PropertyGroup>
 
   <ItemGroup>
