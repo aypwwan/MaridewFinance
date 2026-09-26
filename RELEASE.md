@@ -62,9 +62,14 @@ avoid it. Keep a backup of the keystore outside the repo.
 ## 4. Sync worker
 
 The worker at `sync-worker/` (deployed at
-`https://maridew-sync.maridew.workers.dev`) is independent of releases; deploy
-with `wrangler deploy` from `sync-worker/` after changing `worker.js`. The
-protocol version lives in the worker's `/health` (`v: 4`).
+`https://maridew-sync.maridew.workers.dev`) is independent of releases.
+Deploys are automated: the `Deploy sync worker` workflow (`.github/workflows/deploy-worker.yml`)
+runs whenever `sync-worker/**` changes on `main` (or via *Run workflow*),
+parse-checks the worker, deploys with wrangler, and verifies `/health` reports
+the version parsed from `worker.js`. It requires two repository secrets:
+`CLOUDFLARE_API_TOKEN` (the **Edit Cloudflare Workers** API-token template) and
+`CLOUDFLARE_ACCOUNT_ID`. The protocol version lives in the worker's `/health`
+(`v: 4`).
 
 ## 5. Pre-release checklist
 

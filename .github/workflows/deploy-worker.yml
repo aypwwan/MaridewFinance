@@ -1,0 +1,108 @@
+# Deploys the Cloudflare sync worker (sync-worker/) whenever it changes.
+#
+# Triggered by pushes to main that touch sync-worker/** (or this workflow
+# file), and by manual dispatch from the Actions tab - handy to (re)deploy
+# without a code change.
+#
+# Required repo secrets (Settings > Secrets and variables > Actions):
+#   CLOUDFLARE_API_TOKEN  - token with "Edit Cloudflare Workers" permission
+#   CLOUDFLARE_ACCOUNT_ID - the account id shown on the Workers dashboard
+#
+# Without the secrets the job fails fast with setup instructions instead of
+# emitting a confusing wrangler auth error.
+#
+# After deploying, /health is polled until it reports the worker version
+# constant parsed live from worker.js - so this check can never go stale
+# when the worker is bumped (v4, v5, ...).
+
+name: Deploy sync worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sync-worker/**'
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Parse-check the worker
+        run: node tests/parse-check.js
+
+      - name: Check deploy secrets are configured
+        id: secrets
+        env:
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          if [ "$HAS_TOKEN" = "true" ] && [ "$HAS_ACCOUNT" = "true" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "Missing: $([ "$HAS_TOKEN" = "true" ] || echo -n 'CLOUDFLARE_API_TOKEN ') $([ "$HAS_ACCOUNT" = "true" ] || echo -n 'CLOUDFLARE_ACCOUNT_ID')"
+          fi
+
+      - name: Guard - fail with setup instructions when secrets are missing
+        if: steps.secrets.outputs.ok != 'true'
+        run: |
+          {
+            echo "## Deploy skipped - Cloudflare secrets missing"
+            echo ""
+            echo "Add these repository secrets (Settings > Secrets and variables > Actions > New repository secret):"
+            echo ""
+            echo '1. `CLOUDFLARE_API_TOKEN` - create at https://dash.cloudflare.com/profile/api-tokens using the **Edit Cloudflare Workers** template'
+            echo '2. `CLOUDFLARE_ACCOUNT_ID` - the account id on the Workers & Pages dashboard overview'
+            echo ""
+            echo "Then re-run: Actions > Deploy sync worker > Run workflow."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Read worker version constant
+        id: wver
+        run: |
+          # The /health response object in worker.js: json({ ..., v: 4, ... })
+          # (unquoted key in source, quoted in the JSON output).
+          v=$(grep -oE '\bv: ?[0-9]+' sync-worker/worker.js | grep -oE '[0-9]+' | head -n1)
+          if [ -z "$v" ]; then
+            echo "Could not find the version constant in worker.js /health response."
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Worker will report version $v"
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: sync-worker
+
+      - name: Verify /health reports the deployed version
+        run: |
+          expected='${{ steps.wver.outputs.version }}'
+          for i in $(seq 1 10); do
+            body=$(curl -fsS --max-time 10 https://maridew-sync.maridew.workers.dev/health || true)
+            echo "health: $body"
+            if echo "$body" | grep -q "\"v\":$expected"; then
+              echo "Deployed worker /health reports v$expected as expected."
+              exit 0
+            fi
+            echo "not v$expected yet; retrying in 5s..."
+            sleep 5
+          done
+          echo "/health never reported v$expected after deploy."
+          exit 1
