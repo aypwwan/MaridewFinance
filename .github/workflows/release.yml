@@ -43,7 +43,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Same gate as the Pages deploy: no release ships a dashboard or sync
       # bridge with a syntax error, and the sync-core merge tests must pass.
@@ -57,7 +57,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
@@ -77,7 +77,7 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Derive version from tag (or dispatch input)
         id: ver
@@ -189,7 +189,7 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Derive version from tag (or dispatch input)
         id: ver
@@ -269,7 +269,7 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Derive version from tag (or dispatch input)
         id: ver

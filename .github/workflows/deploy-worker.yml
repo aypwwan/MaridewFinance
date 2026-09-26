@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Parse-check the worker
         run: node tests/parse-check.js
