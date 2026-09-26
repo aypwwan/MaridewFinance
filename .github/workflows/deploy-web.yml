@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # A single JS syntax error takes down the whole dashboard (or, worse,
       # silently disables the Android background sync bridge), so parse-check
@@ -42,7 +42,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # The web edition is pure static files (no build step). Copy wwwroot to
       # the artifact root so the site is served from the Pages domain root.
