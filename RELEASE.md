@@ -73,7 +73,11 @@ the version parsed from `worker.js`. It requires two repository secrets:
 
 ## 5. Pre-release checklist
 
-- [ ] All four version markers updated
+- [ ] All five version markers updated: csproj `<Version>`,
+      `UpdateService.CurrentVersion`, `WEB_VERSION`, Android
+      `<ApplicationDisplayVersion>` (feeds versionName — NOT
+      ApplicationVersionName, which the SDK silently ignores), and Android
+      `<ApplicationVersion>`
 - [ ] `versionCode` formula sanity-check for the new tag
 - [ ] Release notes written into the tag/commit message context
 - [ ] Emulator smoke test: fresh install → sign-in → add entry → background sync tick
