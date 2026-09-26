@@ -122,8 +122,8 @@ jobs:
           }
 
           $androidProj = Get-Content 'MaridewFinance.Android/MaridewFinance.Android.csproj' -Raw
-          if ($androidProj -notmatch [regex]::Escape("<ApplicationVersionName>$version</ApplicationVersionName>")) {
-            Write-Error "Android ApplicationVersionName does not match $version. Bump it first."
+          if ($androidProj -notmatch [regex]::Escape("<ApplicationDisplayVersion>$version</ApplicationDisplayVersion>")) {
+            Write-Error "Android ApplicationDisplayVersion does not match $version. Bump it first."
             exit 1
           }
           if ($androidProj -notmatch [regex]::Escape("<ApplicationVersion>$code</ApplicationVersion>")) {
