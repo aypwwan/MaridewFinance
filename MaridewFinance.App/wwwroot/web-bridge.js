@@ -24,7 +24,7 @@
     if (host && (host.dbBridge || host.updateBridge)) { return; }
 
     // Keep in sync with UpdateService.CurrentVersion (v-bump: release day).
-    var WEB_VERSION = '1.0.9';
+    var WEB_VERSION = '1.0.10';
 
     // ---- Cloud sync (zero-knowledge). Empty = local-only accounts. ----
     // When set, accounts live on the sync Worker and data is AES-GCM
@@ -280,9 +280,16 @@
                 if (payload.settings) {
                     ops.push(dbGet(STORE_KV, settingsKey(uid)).then(function (row) {
                         var cur = (row && row.v) || {};
-                        if (JSON.stringify(cur) !== JSON.stringify(payload.settings)) {
+                        // Merge per key: cloud wins conflicts, but keys that
+                        // exist only locally (saved between pulls) survive.
+                        // Wholesale replacement used to wipe them.
+                        var merged = {};
+                        var k;
+                        for (k in cur) merged[k] = cur[k];
+                        for (k in payload.settings) merged[k] = payload.settings[k];
+                        if (JSON.stringify(cur) !== JSON.stringify(merged)) {
                             changed = true;
-                            return dbPut(STORE_KV, { k: settingsKey(uid), v: payload.settings });   // cloud wins
+                            return dbPut(STORE_KV, { k: settingsKey(uid), v: merged });
                         }
                     }));
                 }
@@ -822,7 +829,10 @@
             return withUser(loadSettingsObj).then(function (o) {
                 o[key] = value;
                 return saveSettingsObj(o);
-            }).then(function () { return ''; });
+            }).then(function () {
+                scheduleCloudPush();   // settings ride the encrypted payload too
+                return '';
+            });
         },
         GetCurrentUserName: function () {
             return withUser(function (uid) {

@@ -736,6 +736,38 @@ namespace MaridewFinance.App
                 // re-adds (which clear tombstones) or new deletions.
                 bridge.SaveTable(table, merged.ToJsonString(), fromSync: true);
             }
+
+            // Settings ride the payload too (e.g. the sidebar display name set
+            // on another device). Merge per key - cloud wins conflicts, but
+            // keys that exist only locally are preserved, mirroring the
+            // web/Android shim. Settings arriving from the cloud must NOT
+            // trigger another push (loop guard).
+            if (cloudPayload["settings"] is JsonObject cloudSettings && cloudSettings.Count > 0)
+            {
+                Dictionary<string, string> localSettings;
+                try
+                {
+                    localSettings = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(bridge.LoadSettings())
+                                     ?? new Dictionary<string, string>();
+                }
+                catch { localSettings = new Dictionary<string, string>(); }
+
+                var mergedSettings = new Dictionary<string, string>(localSettings);
+                foreach (var kv in cloudSettings)
+                {
+                    if (kv.Value is JsonValue v && v.TryGetValue<string>(out var sval))
+                    {
+                        mergedSettings[kv.Key] = sval;
+                    }
+                }
+                foreach (var kv in mergedSettings)
+                {
+                    if (!localSettings.TryGetValue(kv.Key, out var cur) || cur != kv.Value)
+                    {
+                        bridge.SaveSettingWithoutPush(kv.Key, kv.Value);
+                    }
+                }
+            }
         }
 
         /// <summary>

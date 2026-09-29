@@ -940,6 +940,19 @@
                     <div class="rounded-xl border border-slate-800 bg-slate-900/40 p-4 space-y-3">
                         <div class="flex items-center justify-between">
                             <h4 class="text-xs font-bold text-white flex items-center gap-2">
+                                <i data-lucide="id-card" class="w-3.5 h-3.5 text-indigo-400"></i>
+                                Display Name
+                            </h4>
+                            <button id="dn-save-btn" onclick="saveDisplayName()" class="text-[11px] font-medium text-indigo-400 hover:text-indigo-300 transition">Save</button>
+                        </div>
+                        <div class="flex gap-2">
+                            <input id="display-name-input" type="text" maxlength="40" placeholder="Shown in the sidebar and here" autocomplete="off" spellcheck="false" class="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500">
+                        </div>
+                        <p id="dn-hint" class="text-[11px] text-slate-500">Your login username stays unchanged - this is only how your name is displayed. Leave empty to show your username.</p>
+                    </div>
+                    <div class="rounded-xl border border-slate-800 bg-slate-900/40 p-4 space-y-3">
+                        <div class="flex items-center justify-between">
+                            <h4 class="text-xs font-bold text-white flex items-center gap-2">
                                 <i data-lucide="key-round" class="w-3.5 h-3.5 text-indigo-400"></i>
                                 Change Password
                             </h4>
@@ -4491,8 +4504,13 @@ closeModal('categoryModal');
         // db.GetCurrentUserName() during window.onload, so this must be a
         // callable invoked AFTER that assignment - running it at script-parse
         // time (as before) always rendered the 'Account Holder' placeholder.
+        // The user's chosen display name (per-user setting 'displayName')
+        // takes precedence over the login username when set.
+        window.__maridewDisplayName = '';
+
         function renderAccountChip() {
-            const name = (window.__maridewUser || '').trim() || 'Account Holder';
+            const username = (window.__maridewUser || '').trim();
+            const name = window.__maridewDisplayName || username || 'Account Holder';
             const initials = name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
             const avatar = document.getElementById('user-avatar');
             const nameEl = document.getElementById('user-name');
@@ -4500,8 +4518,47 @@ closeModal('categoryModal');
             const sideEl = document.getElementById('sidebar-account-name');
             if (avatar) avatar.innerText = initials;
             if (nameEl) nameEl.innerText = name;
-            if (settingsEl) settingsEl.innerText = name;
+            if (settingsEl) settingsEl.innerText = name + (username && username !== name ? ' (' + username + ')' : '');
             if (sideEl) sideEl.innerText = name;
+        }
+
+        // Display-name field: prefill from the saved setting, save on demand.
+        async function initDisplayName() {
+            const input = document.getElementById('display-name-input');
+            if (!input) return;
+            if (db) {
+                try {
+                    const s = JSON.parse(await db.LoadSettings());
+                    window.__maridewDisplayName = (s.displayName || '').trim();
+                } catch (e) { /* settings unavailable: fall back to username */ }
+            }
+            input.value = window.__maridewDisplayName;
+            renderAccountChip();
+        }
+
+        async function saveDisplayName() {
+            const input = document.getElementById('display-name-input');
+            const hint = document.getElementById('dn-hint');
+            const btn = document.getElementById('dn-save-btn');
+            if (!input || !db) { showToast('Renaming is only available in the apps.'); return; }
+            const clean = input.value.replace(/\s+/g, ' ').trim().slice(0, 40);
+            input.value = clean;
+            const old = window.__maridewDisplayName;
+            window.__maridewDisplayName = clean;   // optimistic
+            renderAccountChip();
+            btn.innerText = 'Saving…';
+            try {
+                await db.SaveSetting('displayName', clean);
+                window.__maridewDisplayName = clean;
+                if (hint) hint.innerText = clean ? 'Saved - shown as "' + clean + '". Your login username stays unchanged.' : 'Saved - your username will be shown.';
+                showToast(clean ? 'Display name updated.' : 'Display name cleared.');
+            } catch (err) {
+                window.__maridewDisplayName = old;   // roll back on failure
+                renderAccountChip();
+                if (hint) hint.innerText = 'Could not save the display name: ' + err.message;
+                showToast('Could not save the display name.');
+            }
+            btn.innerText = 'Save';
         }
 
         // ----------------- SETTINGS: CHANGE PASSWORD -----------------
@@ -4624,7 +4681,7 @@ closeModal('categoryModal');
             await initAutoLock();
             syncRegisteredAccounts();
             window.__maridewUser = (typeof db !== 'undefined' && db) ? await db.GetCurrentUserName() : null;
-            renderAccountChip();   // sidebar/settings now show the signed-in name
+            await initDisplayName();   // applies the saved display name, then renders the chip
             updateKPICards();
             renderTransactions();
             renderBudgets();

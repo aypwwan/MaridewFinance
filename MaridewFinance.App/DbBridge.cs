@@ -73,6 +73,16 @@ namespace MaridewFinance.App
         /// the signed-in user. Returns JSON: { ok, error? }.
         /// </summary>
         public string SaveSetting(string key, string value)
+            => SaveSettingCore(key, value, schedulePush: true);
+
+        /// <summary>
+        /// Writes a setting that arrived from the cloud without scheduling a
+        /// push - the cloud already holds it, and re-pushing would loop.
+        /// </summary>
+        public string SaveSettingWithoutPush(string key, string value)
+            => SaveSettingCore(key, value, schedulePush: false);
+
+        private string SaveSettingCore(string key, string value, bool schedulePush)
         {
             if (_currentUserId == 0)
             {
@@ -93,7 +103,10 @@ namespace MaridewFinance.App
                 cmd.Parameters.AddWithValue("$k", key);
                 cmd.Parameters.AddWithValue("$v", value ?? "");
                 cmd.ExecuteNonQuery();
-                App.CloudSync?.SchedulePush();          // settings sync to the cloud too
+                if (schedulePush)
+                {
+                    App.CloudSync?.SchedulePush();      // settings sync to the cloud too
+                }
                 return JsonSerializer.Serialize(new { ok = true });
             }
             catch (Exception ex)
