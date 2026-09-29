@@ -24,7 +24,7 @@
     if (host && (host.dbBridge || host.updateBridge)) { return; }
 
     // Keep in sync with UpdateService.CurrentVersion (v-bump: release day).
-    var WEB_VERSION = '1.0.10';
+    var WEB_VERSION = '1.0.11';
 
     // ---- Cloud sync (zero-knowledge). Empty = local-only accounts. ----
     // When set, accounts live on the sync Worker and data is AES-GCM
@@ -552,12 +552,13 @@
         dot.textContent = 'M';
         logo.appendChild(dot);
         var ttl = el('div');
-        ttl.appendChild(el('div', 'text-xl font-bold text-white', titleText));
-        ttl.appendChild(el('div', 'text-xs text-slate-400', subtitleText));
+        var titleEl = el('div', 'text-xl font-bold text-white', titleText);
+        var subtitleEl = el('div', 'text-xs text-slate-400', subtitleText);
+        ttl.appendChild(titleEl); ttl.appendChild(subtitleEl);
         logo.appendChild(ttl);
         card.appendChild(logo);
         wrap.appendChild(card);
-        return { wrap: wrap, card: card };
+        return { wrap: wrap, card: card, title: titleEl, subtitle: subtitleEl };
     }
 
     function field(labelText, type, id) {
@@ -606,6 +607,15 @@
         var err = errLine(card);
         var go = busyBtn('Sign In');
         card.appendChild(go);
+
+        // Forgot password: resets LOCAL passwords in-place (data is not
+        // encrypted with them). Cloud accounts get an honest explainer - the
+        // sync server cannot verify or reset a password it can never see.
+        var forgot = el('button', 'mt-3 text-[11px] text-indigo-300 hover:text-indigo-200 underline underline-offset-2 bg-transparent border-0 cursor-pointer p-0 w-full');
+        forgot.type = 'button';
+        forgot.textContent = 'Forgot password?';
+        card.appendChild(forgot);
+
         card.appendChild(el('div', 'text-[11px] text-slate-500 mt-4 leading-relaxed',
             SYNC_SERVER
                 ? 'Accounts sync securely across devices. Data is encrypted in your browser before upload - the server can never read it.'
@@ -627,13 +637,62 @@
         tabIn.onclick = function () { setMode('in'); };
         tabUp.onclick = function () { setMode('up'); };
 
+        forgot.onclick = function () {
+            err.textContent = '';
+            var user = userF.input.value.trim();
+            if (!user) {
+                err.textContent = 'Type your username above first, then tap Forgot password?.';
+                userF.input.focus();
+                return;
+            }
+            findUserByName(user).then(function (u) {
+                if (!u) {
+                    err.textContent = 'No account named "' + user + '" in THIS browser. Accounts live per-browser: new here? Tap "Create Account" to register.';
+                    return;
+                }
+                if (u.salt === 'cloud') {
+                    cloudResetGuidance(u.username);
+                    return;
+                }
+                openResetCard(user);
+            })['catch'](function (e) {
+                err.textContent = (e && e.message) || 'Something went wrong.';
+            });
+        };
+
+        // Local reset: username is already known to belong to a local
+        // account, so only the new password is asked for. The stored salt+hash
+        // are simply replaced; none of the account's data is touched.
+        function openResetCard(username) {
+            mode = 'reset';
+            ui.title.textContent = 'Reset password';
+            ui.subtitle.textContent = 'Enter a new password for "' + username + '". Your data stays exactly as it is.';
+            tabs.style.display = 'none';
+            forgot.style.display = 'none';
+            confF.box.style.display = '';
+            go.textContent = 'Reset Password';
+            err.textContent = '';
+            passF.input.value = '';
+            confF.input.value = '';
+            passF.input.focus();
+        }
+
+        function resetSubmit(username) {
+            var p1 = passF.input.value, p2 = confF.input.value;
+            if (!p1 || p1.length < 6) return { ok: false, error: 'Password must be at least 6 characters.' };
+            if (p1 !== p2) return { ok: false, error: 'Passwords do not match.' };
+            return resetLocalPassword(username, p1);
+        }
+
         function submit() {
             var username = userF.input.value.trim();
             var pass = passF.input.value;
             err.textContent = '';
             go.disabled = true;
             var work;
-            if (mode === 'up') {
+            if (mode === 'reset') {
+                work = Promise.resolve(resetSubmit(username));
+            } else if (mode === 'up') {
                 work = createAccount(username, pass, confF.input.value);
             } else {
                 work = signIn(username, pass);
@@ -654,6 +713,50 @@
 
         document.body.appendChild(ui.wrap);
         setTimeout(function () { userF.input.focus(); }, 50);
+    }
+
+    // Forgot password for a CLOUD account: the password derives the AES key
+    // that encrypts the stored data, so the server can neither verify nor
+    // reset it. Say so plainly, with the practical ways back in.
+    function cloudResetGuidance(username) {
+        var ui = baseOverlay('Cloud accounts cannot be recovered',
+            'Signed in as: @' + username);
+        var card = ui.card;
+        card.appendChild(el('div', 'text-sm text-slate-300 mt-4 leading-relaxed',
+            'Your password unlocks this account AND decrypts your data - the sync server never sees either. That is what keeps your finances private, but it also means no one can email you a reset link.'));
+        card.appendChild(el('div', 'text-sm text-slate-300 mt-3 leading-relaxed', 'You can still get in if:'));
+        card.appendChild(el('div', 'text-sm text-slate-300 mt-1 ml-4 leading-relaxed',
+            '\u2022 Another device where you are signed in still works - change the password there under Settings > Cloud Sync.'));
+        card.appendChild(el('div', 'text-sm text-slate-300 mt-1 ml-4 leading-relaxed',
+            '\u2022 You remember it - just sign in again.'));
+        var close = busyBtn('Back to sign in');
+        close.onclick = function () { ui.wrap.remove(); };
+        card.appendChild(el('div', 'mt-5'));
+        card.appendChild(close);
+        document.body.appendChild(ui.wrap);
+    }
+
+    // Forgot password for a LOCAL (per-browser) account: replace the stored
+    // salt+hash. Data rows are keyed separately and were never encrypted
+    // with the password, so nothing else changes.
+    function resetLocalPassword(username, newPassword) {
+        return findUserByName(username).then(function (u) {
+            if (!u) return { ok: false, error: 'No account named "' + username + '" in THIS browser.' };
+            if (u.salt === 'cloud') return { ok: false, error: 'That is a cloud-synced account - its password cannot be reset locally.' };
+            var salt = newSalt();
+            return hashPassword(newPassword, salt).then(function (hash) {
+                u.salt = salt;
+                u.hash = hash;
+                return openDb().then(function (d) {
+                    return new Promise(function (resolve, reject) {
+                        var t = d.transaction(STORE_USERS, 'readwrite');
+                        var r = t.objectStore(STORE_USERS).put(u);
+                        r.onsuccess = function () { resolve({ ok: true, userId: u.id }); };
+                        r.onerror = function () { reject(r.error); };
+                    });
+                });
+            });
+        });
     }
 
     function createAccount(username, pass, confirm) {
@@ -689,7 +792,17 @@
 
     function signIn(username, pass) {
         if (SYNC_SERVER) {
-            return cloudSignIn(username, pass)['catch'](function (e) {
+            return cloudSignIn(username, pass).then(function (res) {
+                if (res.ok) return res;
+                // The server rejected the credential, but a browser-local
+                // account (created offline, or before this browser linked to
+                // the cloud) must stay usable: let the local check decide.
+                // Local success wins; otherwise the server's uniform error
+                // stands, so cloud-only users see exactly what they saw before.
+                return localSignIn(username, pass).then(function (local) {
+                    return local.ok ? local : res;
+                })['catch'](function () { return res; });
+            })['catch'](function (e) {
                 return localSignIn(username, pass).then(function (res) {
                     if (res.ok) return res;
                     return { ok: false, error: 'Sync server unreachable (' + ((e && e.message) || 'offline') + ') and no matching local account.' };

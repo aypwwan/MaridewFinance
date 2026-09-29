@@ -244,6 +244,39 @@ namespace MaridewFinance.App
         }
 
         /// <summary>
+        /// Resets a local account's password WITHOUT requiring the old one.
+        /// Local data is never encrypted with the password (it is a login gate
+        /// only), so the account and all of its rows stay intact. This powers
+        /// "Forgot password?" on the sign-in screen. It is intentionally a
+        /// LOCAL-only capability: cloud sync passwords derive the encryption
+        /// key and can never be reset this way (see LoginWindow's guidance).
+        /// </summary>
+        public (bool Ok, int UserId, string Error) ResetPassword(string username, string newPassword)
+        {
+            var name = (username ?? "").Trim();
+            if (string.IsNullOrEmpty(newPassword) || newPassword.Length < 6)
+            {
+                return (false, 0, "Password must be at least 6 characters.");
+            }
+
+            if (!TryGetUserIdByName(name, out var userId))
+            {
+                return (false, 0, "No account found with that username.");
+            }
+
+            var salt = RandomNumberGenerator.GetBytes(16);
+            var hash = HashPassword(newPassword, salt);
+            using var db = Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "UPDATE users SET password_hash = $h, salt = $s WHERE id = $id";
+            cmd.Parameters.AddWithValue("$h", Convert.ToBase64String(hash));
+            cmd.Parameters.AddWithValue("$s", Convert.ToBase64String(salt));
+            cmd.Parameters.AddWithValue("$id", userId);
+            cmd.ExecuteNonQuery();
+            return (true, userId, "");
+        }
+
+        /// <summary>
         /// Checks a password against the stored hash without signing in.
         /// Used by the lock screen to confirm the account holder is back.
         /// </summary>

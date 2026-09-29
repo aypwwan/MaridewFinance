@@ -14,6 +14,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- Branding -->
@@ -44,6 +45,11 @@
 
         <!-- Form -->
         <StackPanel Grid.Row="2" VerticalAlignment="Top">
+            <TextBlock x:Name="ModeHeading" Text="" FontWeight="SemiBold" FontSize="14"
+                       Foreground="White" Margin="0,0,0,2" Visibility="Collapsed"/>
+            <TextBlock x:Name="ModeSubtext" Text="" FontSize="11" Foreground="#94A3B8"
+                       TextWrapping="Wrap" Margin="0,0,0,10" Visibility="Collapsed"/>
+
             <TextBlock Text="Username" Foreground="#CBD5E1" FontSize="12" Margin="0,0,0,4"/>
             <TextBox x:Name="UsernameBox" Height="32" Padding="6,4" Margin="0,0,0,10"/>
 
@@ -62,5 +68,13 @@
                 Height="38" FontSize="14" FontWeight="SemiBold" IsDefault="True"
                 Background="#4F46E5" Foreground="White" BorderThickness="0"
                 Cursor="Hand" Margin="0,16,0,0"/>
+
+        <!-- Footer: forgot password link (sign-in mode only) -->
+        <TextBlock Grid.Row="4" HorizontalAlignment="Center" Margin="0,12,0,0">
+            <Hyperlink x:Name="ForgotLink" Click="OnForgotPassword" Foreground="#818CF8"
+                       TextDecorations="{x:Null}">
+                <Run Text="Forgot password?"/>
+            </Hyperlink>
+        </TextBlock>
     </Grid>
 </Window>
