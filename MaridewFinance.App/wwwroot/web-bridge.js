@@ -24,7 +24,7 @@
     if (host && (host.dbBridge || host.updateBridge)) { return; }
 
     // Keep in sync with UpdateService.CurrentVersion (v-bump: release day).
-    var WEB_VERSION = '1.0.7';
+    var WEB_VERSION = '1.0.8';
 
     // ---- Cloud sync (zero-knowledge). Empty = local-only accounts. ----
     // When set, accounts live on the sync Worker and data is AES-GCM
@@ -956,13 +956,16 @@
         },
         DownloadUpdate: function () { return Promise.resolve(''); },
         InstallUpdate: function () { return Promise.resolve(''); },
+        GetAutoUpdateEnabled: function () { return Promise.resolve(false); },
+        SetAutoUpdateEnabled: function () { return Promise.resolve(''); },
         GetUpdateStatus: function () {
             return Promise.resolve(JSON.stringify({
                 state: updateState,
                 latest: '',
                 notes: '',
                 current: WEB_VERSION,
-                message: updateMessage
+                message: updateMessage,
+                autoUpdate: false
             }));
         }
     };

@@ -95,6 +95,9 @@ namespace MaridewFinance.App
 
         private void OnExit(object sender, ExitEventArgs e)
         {
+            // Apply a downloaded-and-verified update silently as the app
+            // closes (automatic updates). No-op unless one is staged.
+            Updater?.OnAppExiting();
             Bridge?.SignOut();
         }
     }

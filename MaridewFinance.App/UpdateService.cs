@@ -38,7 +38,7 @@ namespace MaridewFinance.App
     public class UpdateService
     {
         /// <summary>Keep in sync with the &lt;Version&gt; in MaridewFinance.App.csproj.</summary>
-        public const string CurrentVersion = "1.0.7";
+        public const string CurrentVersion = "1.0.8";
 
         /// <summary>
         /// Where the update feed lives. When GitHubRepo is set (owner/repo),
@@ -63,6 +63,7 @@ namespace MaridewFinance.App
         private readonly string _updateDir;
         private readonly object _lock = new();
         private readonly System.Timers.Timer _pollTimer;
+        private readonly System.Timers.Timer? _autoCheckTimer;
 
         // Latest known state, serialized for the dashboard.
         private string _state = "unknown";   // unknown|idle|checking|none|available|downloading|ready|installing|error
@@ -70,6 +71,15 @@ namespace MaridewFinance.App
         private string _notes = "";
         private string _message = "";
         private string _installerPath = "";
+
+        // Automatic updates (default on): check at startup and every 6 hours,
+        // download + checksum-verify in the background, then install silently
+        // when the app next closes - so a session is never interrupted. The
+        // user can still install immediately from Settings at any time.
+        private bool _autoUpdateEnabled;
+        private bool _autoCheck;               // true while the current check was auto-started
+        private bool _autoDownload;            // true while the current download was auto-started
+        private const int AutoCheckIntervalHours = 6;
 
         public UpdateService()
         {
@@ -81,6 +91,18 @@ namespace MaridewFinance.App
             _state = "idle";
             _message = "Ready to check for updates.";
 
+            // If the previous session exited through the auto-updater, say so
+            // once - the user should never wonder why the app restarted.
+            try
+            {
+                if (File.Exists(PendingMarkerPath))
+                {
+                    _message = "Maridew Finance was updated to " + CurrentVersion + " when the app last closed.";
+                    File.Delete(PendingMarkerPath);
+                }
+            }
+            catch { /* cosmetic only */ }
+
             // One long-lived poller: advances the feed/download phases as the
             // background PowerShell scripts produce their output files.
             _pollTimer = new System.Timers.Timer(1000)
@@ -89,6 +111,158 @@ namespace MaridewFinance.App
             };
             _pollTimer.Elapsed += (_, _) => Poll();
             _pollTimer.Start();
+
+            _autoUpdateEnabled = ReadAutoUpdateSetting();
+            if (_autoUpdateEnabled)
+            {
+                // First check shortly after launch, then every few hours. The
+                // delay lets the app finish opening before the feed is hit.
+                _autoCheckTimer = new System.Timers.Timer(TimeSpan.FromHours(AutoCheckIntervalHours).TotalMilliseconds)
+                {
+                    AutoReset = true
+                };
+                _autoCheckTimer.Elapsed += (_, _) => AutoCheck();
+                _autoCheckTimer.Start();
+                new System.Threading.Timer(_ => AutoCheck(), null, 5000, Timeout.Infinite);
+            }
+        }
+
+        // ------------------------------------------------- automatic updates
+
+        /// <summary>True when automatic background updates are turned on.</summary>
+        public bool AutoUpdateEnabled { get { lock (_lock) return _autoUpdateEnabled; } }
+
+        /// <summary>Bridge: current auto-update preference for the settings UI.</summary>
+        public bool GetAutoUpdateEnabled() => AutoUpdateEnabled;
+
+        /// <summary>Bridge: turn automatic updates on/off (persisted immediately).</summary>
+        public void SetAutoUpdateEnabled(bool enabled)
+        {
+            lock (_lock)
+            {
+                _autoUpdateEnabled = enabled;
+            }
+            WriteAutoUpdateSetting(enabled);
+            if (enabled)
+            {
+                AutoCheck();   // pick up any pending update right away
+            }
+        }
+
+        /// <summary>
+        /// Pending-install marker: written the moment an exit-time
+        /// auto-install is staged, read+cleared on the next launch. If it is
+        /// present at startup, the previous session closed with a verified
+        /// update waiting and the silent installer was launched - so the first
+        /// status message explains what happened instead of leaving the user
+        /// to guess why the app restarted.
+        /// </summary>
+        private string PendingMarkerPath => Path.Combine(_updateDir, "pending-auto-install.txt");
+
+        /// <summary>One automatic check cycle; quiet when the feed is unreachable.</summary>
+        private void AutoCheck()
+        {
+            bool enabled;
+            lock (_lock) { enabled = _autoUpdateEnabled; }
+            if (!enabled) return;
+            lock (_lock)
+            {
+                if (_state == "checking" || _state == "downloading" || _state == "installing") return;
+                _autoCheck = true;
+            }
+            CheckForUpdates();
+        }
+
+        /// <summary>
+        /// Called by the host when the app is closing. With auto-update on and
+        /// a verified installer waiting, stages and launches the silent
+        /// installer so the update applies during shutdown and the app
+        /// relaunches afterwards. The checksum is re-verified here: the
+        /// installer has been sitting on disk since it was downloaded.
+        /// </summary>
+        public void OnAppExiting()
+        {
+            string installer;
+            lock (_lock)
+            {
+                if (!_autoUpdateEnabled || _state != "ready" || _installerPath == "") return;
+                installer = _installerPath;
+            }
+            try
+            {
+                var expected = JsonField(File.ReadAllText(Path.Combine(_updateDir, "latest.json")), "sha256");
+                if (expected == "" || !File.Exists(installer)) return;
+                var actual = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(installer)));
+                if (!string.Equals(actual.Trim(), expected.Trim(), StringComparison.OrdinalIgnoreCase)) return;
+
+                var bat = WriteUpdateBat(installer);
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = bat,
+                    UseShellExecute = true
+                });
+                // Staged: the silent installer is running and this instance is
+                // about to exit. The marker tells the next launch to say so.
+                try { File.WriteAllText(PendingMarkerPath, "staged " + DateTime.Now.ToString("s")); } catch { }
+            }
+            catch
+            {
+                // Never block app shutdown over the update; the user can
+                // still install manually next session.
+            }
+        }
+
+        /// <summary>
+        /// Shared installer staging: writes run-update.bat (silent install,
+        /// then relaunch). Used by the manual install button and by the
+        /// exit-time automatic install.
+        /// </summary>
+        private string WriteUpdateBat(string installerPath)
+        {
+            var exePath = Path.Combine(AppContext.BaseDirectory, "MaridewFinance.exe");
+            var bat = Path.Combine(_updateDir, "run-update.bat");
+            var content = "@echo off\r\n"
+                + "start \"\" /wait \"" + installerPath + "\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART\r\n"
+                + "start \"\" \"" + exePath + "\"\r\n";
+            File.WriteAllText(bat, content);
+            return bat;
+        }
+
+        // ------------------------------------------------------- preferences
+
+        private string SettingsPath => Path.Combine(_dataDir, "settings.json");
+
+        private bool ReadAutoUpdateSetting()
+        {
+            try
+            {
+                var json = File.ReadAllText(SettingsPath);
+                var doc = System.Text.Json.JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("autoUpdate", out var v) && v.ValueKind == System.Text.Json.JsonValueKind.False)
+                {
+                    return false;
+                }
+            }
+            catch
+            {
+                // Missing/unreadable file: default stays enabled.
+            }
+            return true;
+        }
+
+        private void WriteAutoUpdateSetting(bool enabled)
+        {
+            try
+            {
+                var tmp = SettingsPath + ".tmp";
+                File.WriteAllText(tmp, "{\"autoUpdate\":" + (enabled ? "true" : "false") + "}");
+                File.Move(tmp, SettingsPath, overwrite: true);
+            }
+            catch
+            {
+                // Preference persistence is best-effort; the in-memory value
+                // still applies for this session.
+            }
         }
 
         // ----------------- Bridge API (called from JavaScript) ------------
@@ -189,13 +363,7 @@ namespace MaridewFinance.App
             }
             try
             {
-                var exePath = Path.Combine(AppContext.BaseDirectory, "MaridewFinance.exe");
-                var bat = Path.Combine(_updateDir, "run-update.bat");
-                var content = "@echo off\r\n"
-                    + "start \"\" /wait \"" + _installerPath + "\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART\r\n"
-                    + "start \"\" \"" + exePath + "\"\r\n";
-                File.WriteAllText(bat, content);
-
+                var bat = WriteUpdateBat(_installerPath);
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = bat,
@@ -231,7 +399,8 @@ namespace MaridewFinance.App
                     current = CurrentVersion,
                     latest = _latestVersion,
                     notes = _notes,
-                    message = _message
+                    message = _message,
+                    autoUpdate = _autoUpdateEnabled
                 });
             }
         }
@@ -283,7 +452,20 @@ namespace MaridewFinance.App
             }
             _state = "available";
             _latestVersion = version;
-            _message = "Version " + version + " is available.";
+            _message = _autoCheck
+                ? "Version " + version + " will be installed automatically next time you close the app."
+                : "Version " + version + " is available.";
+            _autoCheck = false;
+            // With automatic updates enabled, fetch the installer in the
+            // background right away so it is already verified and waiting by
+            // the time the app closes (or when the user clicks Download/
+            // Install themselves). With it off, downloading stays a manual
+            // click - the preference means no surprise 50 MB downloads.
+            if (_autoUpdateEnabled)
+            {
+                _autoDownload = true;
+                DownloadUpdate();
+            }
         }
 
         private void PollDownload()
@@ -320,7 +502,10 @@ namespace MaridewFinance.App
                 return;
             }
             _state = "ready";
-            _message = "Update downloaded and verified. Ready to install.";
+            _message = _autoDownload
+                ? "Version " + _latestVersion + " is verified and will install next time you close the app."
+                : "Update downloaded and verified. Ready to install.";
+            _autoDownload = false;
         }
 
         // ----------------- Helpers ----------------------------------------

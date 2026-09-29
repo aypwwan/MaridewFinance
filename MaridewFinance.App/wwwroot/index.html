@@ -801,6 +801,15 @@
                         <span id="update-current-version" class="text-white font-mono ml-1">1.0.0</span>
                         <span id="update-notes" class="block text-slate-500 mt-1"></span>
                     </div>
+                    <div id="auto-update-row" class="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/40 p-3">
+                        <div class="min-w-0">
+                            <p class="text-xs font-semibold text-white">Automatic updates</p>
+                            <p id="auto-update-label" class="text-[11px] text-slate-500 mt-0.5">Checks in the background, verifies the download, then installs the next time you close the app.</p>
+                        </div>
+                        <button id="auto-update-toggle" onclick="toggleAutoUpdates()" title="Toggle automatic updates" class="relative w-9 h-5 rounded-full bg-indigo-600 transition-colors shrink-0" data-on="1">
+                            <span id="auto-update-knob" class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform"></span>
+                        </button>
+                    </div>
                     <p class="text-[11px] text-slate-500">Updates are downloaded from the update feed configured for this install and verified by checksum before installing. Windows will ask for permission when the update installs.</p>
                 </div>
 
@@ -4159,6 +4168,7 @@ closeModal('categoryModal');
             statusEl.classList.toggle('text-emerald-400', st.state === 'none' || st.state === 'ready');
             statusEl.classList.toggle('text-indigo-400', st.state === 'available' || st.state === 'downloading' || st.state === 'checking');
             setVersionBadge(st.current || '');
+            renderAutoUpdateToggle(st.autoUpdate !== false);
             const curEl = document.getElementById('update-current-version');
             if (curEl) curEl.innerText = st.current || '1.0.0';
             const notesEl = document.getElementById('update-notes');
@@ -4189,11 +4199,44 @@ closeModal('categoryModal');
             const text = document.getElementById('update-banner-text');
             if (text) {
                 if (st.state === 'downloading') text.innerText = `Downloading Maridew Finance ${st.latest || ''}...`;
-                else if (st.state === 'ready') text.innerText = `Maridew Finance ${st.latest || ''} is ready to install.`;
+                else if (st.state === 'ready') text.innerText = `Maridew Finance ${st.latest || ''} is verified - it installs next time you close the app, or install now.`;
                 else text.innerText = `A new version of Maridew Finance (${st.latest || ''}) is available.`;
             }
             const btn = document.getElementById('banner-update-btn');
             if (btn) btn.innerText = st.state === 'ready' ? 'Install & Restart' : 'Update';
+        }
+
+        // True when updateBridge is the browser shim rather than the real
+        // desktop host object (both live at the same property path).
+        const updIsBrowserShim = !!(window.maridewUpdateBridge &&
+            window.chrome?.webview?.hostObjects?.updateBridge === window.maridewUpdateBridge);
+
+        // Automatic updates toggle (desktop only; state comes from the host).
+        function renderAutoUpdateToggle(on) {
+            const row = document.getElementById('auto-update-row');
+            if (!row) return;
+            row.classList.toggle('hidden', !upd || updIsBrowserShim);   // browser edition: no updater
+            const t = document.getElementById('auto-update-toggle');
+            if (!t) return;
+            t.dataset.on = on ? '1' : '0';
+            t.classList.toggle('bg-indigo-600', on);
+            t.classList.toggle('bg-slate-700', !on);
+            const knob = document.getElementById('auto-update-knob');
+            if (knob) knob.style.transform = on ? 'translateX(16px)' : 'translateX(0)';
+            const label = document.getElementById('auto-update-label');
+            if (label) label.innerText = on
+                ? 'On - checks in the background, verifies the download, then installs the next time you close the app.'
+                : 'Off - you will be asked when a new version is available.';
+        }
+
+        async function toggleAutoUpdates() {
+            if (!upd || updIsBrowserShim) return showToast('Updates are managed by the desktop app.');
+            let cur = true;
+            try { cur = await upd.GetAutoUpdateEnabled(); } catch (e) { return; }
+            try { await upd.SetAutoUpdateEnabled(!cur); } catch (e) { return; }
+            renderAutoUpdateToggle(!cur);
+            showToast(!cur ? 'Automatic updates turned on.' : 'Automatic updates turned off.');
+            refreshUpdateUI();
         }
 
         function dismissUpdateBanner() {
