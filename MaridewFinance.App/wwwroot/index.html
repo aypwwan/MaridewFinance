@@ -4487,9 +4487,12 @@ closeModal('categoryModal');
             }
         }
 
-        // Signed-in identity (injected by the desktop host)
-        (function initAccountChip() {
-            const name = window.__maridewUser || 'Account Holder';
+        // Signed-in identity: the desktop host injects the real username via
+        // db.GetCurrentUserName() during window.onload, so this must be a
+        // callable invoked AFTER that assignment - running it at script-parse
+        // time (as before) always rendered the 'Account Holder' placeholder.
+        function renderAccountChip() {
+            const name = (window.__maridewUser || '').trim() || 'Account Holder';
             const initials = name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
             const avatar = document.getElementById('user-avatar');
             const nameEl = document.getElementById('user-name');
@@ -4499,7 +4502,7 @@ closeModal('categoryModal');
             if (nameEl) nameEl.innerText = name;
             if (settingsEl) settingsEl.innerText = name;
             if (sideEl) sideEl.innerText = name;
-        })();
+        }
 
         // ----------------- SETTINGS: CHANGE PASSWORD -----------------
         function togglePasswordForm() {
@@ -4621,6 +4624,7 @@ closeModal('categoryModal');
             await initAutoLock();
             syncRegisteredAccounts();
             window.__maridewUser = (typeof db !== 'undefined' && db) ? await db.GetCurrentUserName() : null;
+            renderAccountChip();   // sidebar/settings now show the signed-in name
             updateKPICards();
             renderTransactions();
             renderBudgets();
